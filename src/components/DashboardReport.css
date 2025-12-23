@@ -28,12 +28,25 @@
     width: 100%;
     border-collapse: collapse;
     font-size: 0.95rem;
+    table-layout: fixed;
+    /* Enforce specific widths */
 }
 
-.report-table th,
-.report-table td {
+/* First Column: Category */
+.report-table th:nth-child(1),
+.report-table td:nth-child(1) {
+    width: 32%;
     padding: 0.75rem 1rem;
     text-align: left;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+/* Other Columns: Budget + 3 Months */
+.report-table th:not(:nth-child(1)),
+.report-table td:not(:nth-child(1)) {
+    width: 17%;
+    padding: 0.75rem 1rem;
+    text-align: right;
     border-bottom: 1px solid #f0f0f0;
 }
 
@@ -41,6 +54,11 @@
     font-weight: 600;
     color: #666;
     background-color: #f9fafb;
+}
+
+.report-table th.num-col {
+    text-align: right;
+    /* Ensure header aligns with numbers */
 }
 
 .report-table .num-col {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { collection, query, where, getDocs, Timestamp } from 'firebase/firestore'
+import { collection, query, where, getDocs } from 'firebase/firestore'
 import { db } from '../config/firebase'
 import { BudgetCategory } from '../pages/Budget.tsx'
 import './DashboardReport.css'
@@ -128,12 +128,10 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
             const budgetsSnapshot = await getDocs(query(collection(db, 'budgets'), where('userId', '==', currentUser.uid)))
             const budgets = budgetsSnapshot.docs.map(d => ({ id: d.id, ...d.data() } as BudgetCategory))
 
-            // 3. Fetch transactions
+            // 3. Fetch transactions (Fetch all for user to avoid Index requirements, then filter in memory)
             const transactionsSnapshot = await getDocs(query(
                 collection(db, 'transactions'),
-                where('userId', '==', currentUser.uid),
-                where('date', '>=', Timestamp.fromDate(globalStart)),
-                where('date', '<', Timestamp.fromDate(globalEnd))
+                where('userId', '==', currentUser.uid)
             ))
 
             // 4. Initialize Data Structure
@@ -155,20 +153,55 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
             })
 
             // Map categories to rows
+
+            interface InternalCategoryRow {
+                ids: string[]
+                name: string
+                budget: number
+                months: { [key: string]: number }
+                type: string
+            }
+
+            // Map categories to matched rows (Merged by normalized name)
+            const rowsMap = new Map<string, InternalCategoryRow>()
+
             budgets.forEach(cat => {
+                const normName = cat.name.trim().toLowerCase()
                 const type = cat.type || 'monthly'
-                const section = data[type] ? data[type] : data.monthly // fallback
+                const amount = typeof cat.amount === 'number' ? cat.amount : parseFloat(cat.amount) || 0
 
-                const row: CategoryRow = {
-                    id: cat.id!,
-                    name: cat.name,
-                    budget: cat.amount,
-                    months: {}
+                if (!rowsMap.has(normName)) {
+                    rowsMap.set(normName, {
+                        ids: [cat.id!],
+                        name: cat.name,
+                        budget: amount,
+                        months: {},
+                        type: type
+                    })
+                    // Init months
+                    monthKeys.forEach(k => rowsMap.get(normName)!.months[k] = 0)
+                } else {
+                    const existing = rowsMap.get(normName)!
+                    existing.ids.push(cat.id!)
+                    existing.budget += amount
                 }
-                monthKeys.forEach(k => row.months[k] = 0)
+            })
 
-                section.rows.push(row)
-                section.totalBudget += cat.amount
+            // Push merged rows to sections
+            rowsMap.forEach((row) => {
+                const section = data[row.type] ? data[row.type] : data.monthly
+
+                const finalRow: CategoryRow = {
+                    id: row.ids[0],
+                    name: row.name,
+                    budget: row.budget,
+                    months: row.months
+                }
+                    // Attach for lookup
+                    ; (finalRow as any).ids = row.ids
+
+                section.rows.push(finalRow)
+                section.totalBudget += row.budget
             })
 
             // Sort rows alphabetically
@@ -177,14 +210,35 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
             data.adhoc.rows.sort((a: any, b: any) => a.name.localeCompare(b.name))
 
             // 5. Process Transactions
+            const globalStartMs = globalStart.getTime()
+            const globalEndMs = globalEnd.getTime()
+
             transactionsSnapshot.docs.forEach(doc => {
                 const txn = doc.data()
-                const date = txn.date.toDate()
+
+                // Safely convert date
+                let date: Date
+                try {
+                    // Handle Firestore Timestamp or standard Date string/object
+                    if (txn.date && typeof txn.date.toDate === 'function') {
+                        date = txn.date.toDate()
+                    } else if (txn.date) {
+                        date = new Date(txn.date)
+                    } else {
+                        return // No date, skip
+                    }
+                } catch (e) {
+                    return // Invalid date, skip
+                }
+
+                // Filter by date range (inclusive start, exclusive end)
+                const time = date.getTime()
+                if (time < globalStartMs || time >= globalEndMs) return
+
                 const amount = txn.amount
                 const catId = txn.categoryId
 
                 // Determine which month bucket this txn falls into
-                // We can't just rely on our pre-calc keys, we must check the date against the range logic
                 const info = getFiscalMonthInfo(date, monthStartDay)
                 const key = info.key
 
@@ -194,21 +248,37 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                     // Unmapped
                     data.unmapped.months[key] += amount
                 } else {
-                    // Find the category row
                     let found = false
-                        // Check all sections
+                    const txnName = (txn.categoryName || '').trim().toLowerCase()
+
+                        // 1. Try match by ID (preferred)
                         ;['income', 'monthly', 'adhoc'].forEach(type => {
-                            const row = data[type].rows.find((r: any) => r.id === catId)
+                            const row = data[type].rows.find((r: any) => r.ids && r.ids.includes(catId))
                             if (row) {
                                 row.months[key] += amount
-                                // Also add to section total
                                 data[type].totalMonths[key] += amount
                                 found = true
                             }
                         })
 
+                    // 2. Fallback: Try match by Name (if name exists)
+                    if (!found && txnName) {
+                        ;['income', 'monthly', 'adhoc'].forEach(type => {
+                            if (found) return // Stop if found in previous type iteration? 
+                            // Actually we need to break the outer loop or just check `!found`
+
+                            // Find row where name matches
+                            const row = data[type].rows.find((r: any) => r.name.trim().toLowerCase() === txnName)
+                            if (row) {
+                                row.months[key] += amount
+                                data[type].totalMonths[key] += amount
+                                found = true
+                            }
+                        })
+                    }
+
                     if (!found) {
-                        // Category exists in txn but not in current budgets (maybe deleted)
+                        // Truly unmapped relative to current budget list
                         data.unmapped.months[key] += amount
                     }
                 }
