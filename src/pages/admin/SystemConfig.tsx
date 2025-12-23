@@ -3,8 +3,15 @@ import { collection, getDocs, doc, setDoc } from 'firebase/firestore'
 import { db } from '../../config/firebase'
 import './Admin.css'
 
+type BudgetType = 'income' | 'monthly' | 'adhoc'
+
+interface DefaultCategory {
+  name: string
+  type: BudgetType
+}
+
 interface SystemConfig {
-  defaultCategories: string[]
+  defaultCategories: DefaultCategory[]
   currency: string
   fiscalYearStart: string
 }
@@ -17,9 +24,15 @@ export default function SystemConfig() {
   })
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [newCategory, setNewCategory] = useState('')
+
+  // New category inputs
+  const [newCategoryName, setNewCategoryName] = useState('')
+  const [newCategoryType, setNewCategoryType] = useState<BudgetType>('monthly')
+
+  // Edit inputs
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
-  const [editValue, setEditValue] = useState('')
+  const [editName, setEditName] = useState('')
+  const [editType, setEditType] = useState<BudgetType>('monthly')
 
   useEffect(() => {
     loadConfig()
@@ -29,8 +42,29 @@ export default function SystemConfig() {
     try {
       const configDoc = await getDocs(collection(db, 'systemConfig'))
       if (!configDoc.empty) {
-        const data = configDoc.docs[0].data() as SystemConfig
-        setConfig(data)
+        const data = configDoc.docs[0].data()
+
+        // Migration: Check if defaultCategories is string[] or object[]
+        let categories: DefaultCategory[] = []
+        if (Array.isArray(data.defaultCategories)) {
+          if (data.defaultCategories.length > 0 && typeof data.defaultCategories[0] === 'string') {
+            // It's the old format [string], convert to object
+            categories = (data.defaultCategories as string[]).map(name => ({
+              name,
+              type: 'monthly' // Default to monthly during migration
+            }))
+          } else {
+            // It's likely the new format
+            categories = data.defaultCategories as DefaultCategory[]
+          }
+        }
+
+        setConfig({
+          ...data,
+          defaultCategories: categories,
+          currency: data.currency || 'ZAR',
+          fiscalYearStart: data.fiscalYearStart || '01-01'
+        })
       }
     } catch (error) {
       console.error('Error loading config:', error)
@@ -54,31 +88,36 @@ export default function SystemConfig() {
 
   function addDefaultCategory(e: React.FormEvent) {
     e.preventDefault()
-    if (newCategory.trim()) {
+    if (newCategoryName.trim()) {
       setConfig({
         ...config,
-        defaultCategories: [...config.defaultCategories, newCategory.trim()],
+        defaultCategories: [
+          ...config.defaultCategories,
+          { name: newCategoryName.trim(), type: newCategoryType }
+        ],
       })
-      setNewCategory('')
+      setNewCategoryName('')
+      setNewCategoryType('monthly')
     }
   }
 
-  function startEdit(index: number, currentVal: string) {
+  function startEdit(index: number, cat: DefaultCategory) {
     setEditingIndex(index)
-    setEditValue(currentVal)
+    setEditName(cat.name)
+    setEditType(cat.type)
   }
 
   function saveEdit(index: number) {
-    if (editValue.trim()) {
+    if (editName.trim()) {
       const newCategories = [...config.defaultCategories]
-      newCategories[index] = editValue.trim()
+      newCategories[index] = { name: editName.trim(), type: editType }
       setConfig({
         ...config,
         defaultCategories: newCategories
       })
     }
     setEditingIndex(null)
-    setEditValue('')
+    setEditName('')
   }
 
   function removeCategory(index: number) {
@@ -109,19 +148,30 @@ export default function SystemConfig() {
         <div className="config-card">
           <h2>Default Budget Categories</h2>
           <p className="config-hint">
-            These categories will be suggested when new users create their first budget.
+            These categories and types will be suggested when new users create their first budget.
           </p>
 
           <div className="categories-manager">
             <form onSubmit={addDefaultCategory} className="add-category-form">
               <input
                 type="text"
-                value={newCategory}
-                onChange={(e) => setNewCategory(e.target.value)}
+                value={newCategoryName}
+                onChange={(e) => setNewCategoryName(e.target.value)}
                 placeholder="New category name..."
                 className="form-input"
+                style={{ flex: 2 }}
               />
-              <button type="submit" className="btn-primary" disabled={!newCategory.trim()}>
+              <select
+                value={newCategoryType}
+                onChange={(e) => setNewCategoryType(e.target.value as BudgetType)}
+                className="form-select"
+                style={{ flex: 1 }}
+              >
+                <option value="income">Income</option>
+                <option value="monthly">Monthly</option>
+                <option value="adhoc">Ad Hoc</option>
+              </select>
+              <button type="submit" className="btn-primary" disabled={!newCategoryName.trim()}>
                 Add
               </button>
             </form>
@@ -130,14 +180,25 @@ export default function SystemConfig() {
               {config.defaultCategories.map((cat, index) => (
                 <div key={index} className="category-item-config">
                   {editingIndex === index ? (
-                    <div className="edit-mode">
+                    <div className="edit-mode" style={{ width: '100%' }}>
                       <input
                         type="text"
-                        value={editValue}
-                        onChange={(e) => setEditValue(e.target.value)}
+                        value={editName}
+                        onChange={(e) => setEditName(e.target.value)}
                         autoFocus
                         className="edit-input"
+                        style={{ flex: 2 }}
                       />
+                      <select
+                        value={editType}
+                        onChange={(e) => setEditType(e.target.value as BudgetType)}
+                        className="edit-select"
+                        style={{ flex: 1, padding: '0.25rem' }}
+                      >
+                        <option value="income">Income</option>
+                        <option value="monthly">Monthly</option>
+                        <option value="adhoc">Ad Hoc</option>
+                      </select>
                       <div className="edit-actions">
                         <button onClick={() => saveEdit(index)} className="btn-icon check" aria-label="Save">✓</button>
                         <button onClick={() => setEditingIndex(null)} className="btn-icon cancel" aria-label="Cancel">✕</button>
@@ -145,7 +206,12 @@ export default function SystemConfig() {
                     </div>
                   ) : (
                     <>
-                      <span className="category-name">{cat}</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1 }}>
+                        <span className="category-name">{cat.name}</span>
+                        <span className={`badge ${cat.type === 'income' ? 'badge-success' : 'badge-secondary'}`} style={{ fontSize: '0.7rem' }}>
+                          {cat.type}
+                        </span>
+                      </div>
                       <div className="item-actions">
                         <button
                           onClick={() => startEdit(index, cat)}

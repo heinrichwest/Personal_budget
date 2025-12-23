@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { collection, query, where, getDocs, addDoc, updateDoc, orderBy, Timestamp, writeBatch, doc } from 'firebase/firestore'
 import { db } from '../config/firebase'
 import { useAuth } from '../contexts/AuthContext'
@@ -46,6 +46,7 @@ export default function Transactions() {
   const [searchTerm, setSearchTerm] = useState('')
   const [categories, setCategories] = useState<Array<{ id: string; name: string }>>([])
   const [showUnmappedOnly, setShowUnmappedOnly] = useState(false)
+  const [showAIReview, setShowAIReview] = useState(false)
 
   useEffect(() => {
     if (!currentUser) return
@@ -181,7 +182,22 @@ export default function Transactions() {
 
         const prompt = `
               I have a list of bank transactions. Please analyze them and suggest a "Merchant" (clean name) and a matching "Category" from my list.
+
+              CRITICAL RULE for "Merchant":
+              - Extract ONLY the brand or franchise name.
+              - REMOVE all cities, locations, suburbs, branch codes, and store numbers.
+              - REMOVE generic words like "Store", "Shop", "Checkers", etc if attached to a location unless it is the brand itself.
+              - REMOVE prefixes like "CROSS-BORDER CARD FEE", "Purchase at", "Debit".
+              - If the description is a URL (e.g., "APPLE.COM/BILL"), extract the main name ("Apple").
               
+              Examples: 
+                - "KFC CENT400723 CENTURION ZA" -> "KFC"
+                - "UBER EATS JOHANNESBURG ZA" -> "Uber Eats"
+                - "KAUAI IRENE LINK DORINGKLOOF" -> "Kauai"
+                - "CHECKERS HYPER MENLYN" -> "Checkers Hyper"
+                - "CROSS-BORDER CARD FEE - APPLE.COM/BILL" -> "Apple"
+                - "CROSS-BORDER CARD FEE - TEMU.COM" -> "Temu"
+
               My Categories: ${categoryNames}
               
               Transactions:
@@ -597,10 +613,18 @@ export default function Transactions() {
   const [saveRule, setSaveRule] = useState(true)
   const [updateSimilar, setUpdateSimilar] = useState(true)
 
-  // AI Review State
-  const [showAIReview, setShowAIReview] = useState(false)
-  const [selectedReviewIds, setSelectedReviewIds] = useState<Set<string>>(new Set())
-  const [selectedRuleIds, setSelectedRuleIds] = useState<Set<string>>(new Set())
+  // Rule Proposal State
+  interface ProposedRule {
+    id: string
+    matchText: string
+    cleanName: string
+    categoryId: string
+    categoryName: string
+    affectedTransactionIds: string[]
+  }
+
+  const [proposedRules, setProposedRules] = useState<ProposedRule[]>([])
+  const [viewingRuleMatches, setViewingRuleMatches] = useState<string | null>(null) // Rule ID
 
   // Reset modal state when opening
   useEffect(() => {
@@ -611,15 +635,44 @@ export default function Transactions() {
     }
   }, [selectedTransaction])
 
-  // Reset selection when review modal opens
+  // Generate Rules when modal opens
   useEffect(() => {
     if (showAIReview) {
-      const suggestions = transactions.filter(t => t.suggestedCategory)
-      const allIds = new Set(suggestions.map(t => t.id as string))
-      setSelectedReviewIds(allIds)
-      setSelectedRuleIds(allIds) // Default to saving rules for all
+      generateProposedRules()
     }
   }, [showAIReview, transactions])
+
+  function generateProposedRules() {
+    const rulesMap = new Map<string, ProposedRule>()
+
+    // 1. Group by Suggested Merchant (Potential Rule)
+    const candidates = transactions.filter(t => t.suggestedMerchant && t.suggestedCategory)
+
+    candidates.forEach(t => {
+      const ruleText = t.suggestedMerchant!.trim() // The AI's clean name is our best rule candidate
+      const ruleKey = ruleText.toLowerCase()
+
+      if (!rulesMap.has(ruleKey)) {
+        // Find all unmapped transactions that match this rule text
+        // (This confirms how effective the rule would be)
+        const matches = transactions.filter(tr =>
+          !tr.categoryId && // Only care about unmapped
+          normalizeMatchText(tr.description).includes(normalizeMatchText(ruleText))
+        )
+
+        rulesMap.set(ruleKey, {
+          id: ruleKey, // temp id
+          matchText: ruleText,
+          cleanName: t.suggestedMerchant!,
+          categoryId: t.suggestedCategory!,
+          categoryName: t.suggestedCategoryName!,
+          affectedTransactionIds: matches.map(m => m.id as string)
+        })
+      }
+    })
+
+    setProposedRules(Array.from(rulesMap.values()))
+  }
 
   const similarCount = transactions.filter(t =>
     selectedTransaction &&
@@ -627,120 +680,52 @@ export default function Transactions() {
     normalizeMatchText(t.description).includes(normalizeMatchText(matchRuleInput))
   ).length
 
-  async function handleBulkApprove() {
-    if (selectedReviewIds.size === 0) return
-
-    const batch = writeBatch(db)
-    let count = 0
-    let ruleCount = 0
-    const processedRules = new Set<string>() // To avoid duplicate rules in this batch
-
-    // Approve selected
-    for (const id of Array.from(selectedReviewIds)) {
-      const t = transactions.find(trans => trans.id === id)
-      if (t && t.suggestedCategory) {
-        const ref = doc(db, 'transactions', id)
-        batch.update(ref, {
-          categoryId: t.suggestedCategory,
-          categoryName: t.suggestedCategoryName,
-          mappedDescription: t.suggestedMerchant || t.mappedDescription || t.description,
-          suggestedCategory: null,
-          suggestedCategoryName: null,
-          suggestedMerchant: null
-        })
-        count++
-
-        // Handle Save Rule
-        if (selectedRuleIds.has(id) && t.suggestedMerchant) {
-          const ruleText = normalizeMatchText(t.suggestedMerchant)
-
-          // Only save unique rules per batch
-          if (!processedRules.has(ruleText)) {
-            processedRules.add(ruleText)
-
-            const ruleRef = doc(collection(db, 'transactionMappings'))
-            batch.set(ruleRef, {
-              originalDescription: t.suggestedMerchant, // The Match Rule
-              mappedDescription: t.suggestedMerchant,   // The Clean Name
-              categoryId: t.suggestedCategory,
-              userId: currentUser!.uid,
-              createdAt: new Date(),
-              updatedAt: new Date(),
-              source: 'ai_auto'
-            })
-            ruleCount++
-          }
-        }
-      }
-    }
-
-    // Reject unselected (Clear suggestions)
-    const unselected = transactions.filter(t => t.suggestedCategory && !selectedReviewIds.has(t.id as string))
-    unselected.forEach(t => {
-      if (t.id) {
-        const ref = doc(db, 'transactions', t.id)
-        batch.update(ref, {
-          suggestedCategory: null,
-          suggestedCategoryName: null,
-          suggestedMerchant: null
-        })
-      }
-    })
+  async function handleSaveRule(rule: ProposedRule) {
+    if (!currentUser) return
 
     try {
+      const batch = writeBatch(db)
+
+      // 1. Create the persistent Rule
+      // We use 'suggestedMerchant' (cleanName) as the mapped description
+      const ruleRef = doc(collection(db, 'transactionMappings'))
+      batch.set(ruleRef, {
+        originalDescription: rule.matchText, // The string we look for
+        mappedDescription: rule.cleanName,   // The clean name we apply
+        categoryId: rule.categoryId,
+        userId: currentUser.uid,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        source: 'ai_rule_gen'
+      })
+
+      // 2. Update ALL affected transactions
+      rule.affectedTransactionIds.forEach(id => {
+        const ref = doc(db, 'transactions', id)
+        batch.update(ref, {
+          categoryId: rule.categoryId,
+          categoryName: rule.categoryName,
+          mappedDescription: rule.cleanName,
+          // Clear AI fields
+          suggestedCategory: null,
+          suggestedCategoryName: null,
+          suggestedMerchant: null
+        })
+      })
+
       await batch.commit()
-      setShowAIReview(false)
+
+      // Remove from list
+      setProposedRules(prev => prev.filter(p => p.id !== rule.id))
       loadTransactions()
-      alert(`Approved ${count} transactions and saved ${ruleCount} new rules.`)
+      alert(`Rule saved! ${rule.affectedTransactionIds.length} transactions updated.`)
+
     } catch (e) {
-      console.error("Error bulk approving", e)
-      alert("Failed to approve mappings")
+      console.error("Error saving rule", e)
+      alert("Failed to save rule")
     }
   }
 
-  function toggleRuleSelection(id: string) {
-    const newSet = new Set(selectedRuleIds)
-    if (newSet.has(id)) {
-      newSet.delete(id)
-    } else {
-      newSet.add(id)
-    }
-    setSelectedRuleIds(newSet)
-  }
-
-  function toggleCategoryRules(catName: string, ids: string[]) {
-    const newSet = new Set(selectedRuleIds)
-    const allSelected = ids.every(id => newSet.has(id))
-
-    if (allSelected) {
-      ids.forEach(id => newSet.delete(id))
-    } else {
-      ids.forEach(id => newSet.add(id))
-    }
-    setSelectedRuleIds(newSet)
-  }
-
-  function toggleReviewSelection(id: string) {
-    const newSet = new Set(selectedReviewIds)
-    if (newSet.has(id)) {
-      newSet.delete(id)
-    } else {
-      newSet.add(id)
-    }
-    setSelectedReviewIds(newSet)
-  }
-
-  function toggleCategorySelection(catName: string, ids: string[]) {
-    const newSet = new Set(selectedReviewIds)
-    const allSelected = ids.every(id => newSet.has(id))
-
-    if (allSelected) {
-      ids.forEach(id => newSet.delete(id))
-    } else {
-      ids.forEach(id => newSet.add(id))
-    }
-    setSelectedReviewIds(newSet)
-  }
 
   if (loading) {
     return (
@@ -1004,106 +989,133 @@ export default function Transactions() {
       {showAIReview && (
         <div className="mapping-modal">
           <div className="mapping-modal-content" style={{ maxWidth: '900px', width: '90%', maxHeight: '90vh', overflowY: 'auto' }}>
-            <h2 style={{ borderBottom: '1px solid #eee', paddingBottom: '1rem', marginBottom: '1rem' }}>AI Auto-Categorize Review</h2>
+            <h2 style={{ borderBottom: '1px solid #eee', paddingBottom: '1rem', marginBottom: '1rem' }}>AI Proposed Rules</h2>
             <p style={{ color: '#666', marginBottom: '1.5rem' }}>
-              Review the AI's suggestions below. Uncheck any you want to reject.
+              Based on your unmapped transactions, here are some suggested rules.
               <br />
-              <strong>Save Rule:</strong> check this to automatically categorize similar transactions in future uploads.
+              Approve a rule to automatically map all current and future matching transactions.
             </p>
 
             <div className="review-table-container">
-              {Object.entries(
-                transactions
-                  .filter(t => t.suggestedCategory)
-                  .reduce((acc, t) => {
-                    const cat = t.suggestedCategoryName || 'Uncategorized';
-                    if (!acc[cat]) acc[cat] = [];
-                    acc[cat].push(t);
-                    return acc;
-                  }, {} as Record<string, Transaction[]>)
-              ).sort((a, b) => a[0].localeCompare(b[0])).map(([category, items]) => {
-                const allSelected = items.every(i => selectedReviewIds.has(i.id!));
-                const allRulesSelected = items.every(i => selectedRuleIds.has(i.id!));
-
-                return (
-                  <div key={category} style={{ marginBottom: '2rem' }}>
-                    <div style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      background: '#f8f9fa',
-                      padding: '0.75rem',
-                      borderRadius: '6px',
-                      marginBottom: '0.5rem',
-                      fontWeight: 'bold',
-                      borderLeft: '4px solid #7c4dff'
-                    }}>
-                      <input
-                        type="checkbox"
-                        checked={allSelected}
-                        onChange={() => toggleCategorySelection(category, items.map(i => i.id!))}
-                        title="Approve All in Category"
-                        style={{ width: '18px', height: '18px', marginRight: '10px', cursor: 'pointer' }}
-                      />
-                      <span>{category}</span>
-                      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        <label style={{ fontSize: '0.8rem', fontWeight: 'normal', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid #eee', color: '#888', textAlign: 'left' }}>
+                    <th style={{ padding: '8px' }}>Rule (Match Text)</th>
+                    <th style={{ padding: '8px' }}>Clean Name</th>
+                    <th style={{ padding: '8px' }}>Category</th>
+                    <th style={{ padding: '8px', textAlign: 'center' }}>Matches</th>
+                    <th style={{ padding: '8px' }}>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {proposedRules.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
+                        No rules could be generated. Try analyzing more transactions.
+                      </td>
+                    </tr>
+                  ) : proposedRules.map(rule => (
+                    <React.Fragment key={rule.id}>
+                      <tr style={{ borderBottom: '1px solid #fcfcfc', backgroundColor: viewingRuleMatches === rule.id ? '#f5f5f5' : 'white' }}>
+                        <td style={{ padding: '8px' }}>
                           <input
-                            type="checkbox"
-                            checked={allRulesSelected}
-                            onChange={() => toggleCategoryRules(category, items.map(i => i.id!))}
+                            type="text"
+                            value={rule.matchText}
+                            style={{
+                              border: '1px solid #ddd',
+                              borderRadius: '4px',
+                              padding: '4px 8px',
+                              width: '100%',
+                              fontWeight: 500
+                            }}
+                            onChange={(e) => {
+                              const newMatch = e.target.value
+                              setProposedRules(prev => prev.map(r => r.id === rule.id ? { ...r, matchText: newMatch } : r))
+                            }}
                           />
-                          Save all rules
-                        </label>
-                        <span style={{ fontSize: '0.8rem', color: '#666', background: 'white', padding: '2px 8px', borderRadius: '12px' }}>
-                          {items.length} items
-                        </span>
-                      </div>
-                    </div>
-                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
-                      <thead>
-                        <tr style={{ borderBottom: '1px solid #eee', color: '#888', textAlign: 'left' }}>
-                          <th style={{ padding: '8px', width: '40px' }} title="Approve">Appr.</th>
-                          <th style={{ padding: '8px', width: '40px' }} title="Save Rule">Rule</th>
-                          <th style={{ padding: '8px' }}>Date</th>
-                          <th style={{ padding: '8px' }}>Original Description</th>
-                          <th style={{ padding: '8px' }}>Suggested Merchant / Clean Name</th>
-                          <th style={{ padding: '8px', textAlign: 'right' }}>Amount</th>
+                        </td>
+                        <td style={{ padding: '8px' }}>
+                          <input
+                            type="text"
+                            value={rule.cleanName}
+                            style={{
+                              border: '1px solid #ddd',
+                              borderRadius: '4px',
+                              padding: '4px 8px',
+                              width: '100%',
+                              color: '#7c4dff',
+                              fontWeight: 500
+                            }}
+                            onChange={(e) => {
+                              const newName = e.target.value
+                              setProposedRules(prev => prev.map(r => r.id === rule.id ? { ...r, cleanName: newName } : r))
+                            }}
+                          />
+                        </td>
+                        <td style={{ padding: '8px' }}>
+                          <select
+                            value={rule.categoryId}
+                            onChange={(e) => {
+                              const newCatId = e.target.value
+                              const newCatName = categories.find(c => c.id === newCatId)?.name || 'Unknown'
+                              setProposedRules(prev => prev.map(r => r.id === rule.id ? { ...r, categoryId: newCatId, categoryName: newCatName } : r))
+                            }}
+                            style={{
+                              border: '1px solid #ddd',
+                              borderRadius: '4px',
+                              padding: '4px',
+                              width: '100%',
+                              fontSize: '0.9rem'
+                            }}
+                          >
+                            {categories.map(cat => (
+                              <option key={cat.id} value={cat.id}>{cat.name}</option>
+                            ))}
+                          </select>
+                        </td>
+                        <td style={{ padding: '8px', textAlign: 'center' }}>
+                          <button
+                            onClick={() => setViewingRuleMatches(viewingRuleMatches === rule.id ? null : rule.id)}
+                            style={{ background: 'none', border: 'none', color: '#2196f3', cursor: 'pointer', textDecoration: 'underline' }}
+                          >
+                            {rule.affectedTransactionIds.length} txs
+                          </button>
+                        </td>
+                        <td style={{ padding: '8px' }}>
+                          <button
+                            onClick={() => handleSaveRule(rule)}
+                            className="btn-sm btn-primary"
+                            style={{ padding: '4px 12px' }}
+                          >
+                            Approve Rule
+                          </button>
+                        </td>
+                      </tr>
+                      {viewingRuleMatches === rule.id && (
+                        <tr>
+                          <td colSpan={5} style={{ padding: '0 1rem 1rem 1rem', backgroundColor: '#f5f5f5' }}>
+                            <div style={{ maxHeight: '200px', overflowY: 'auto', background: 'white', padding: '10px', borderRadius: '4px', border: '1px solid #ddd' }}>
+                              <strong>Matching Transactions:</strong>
+                              <ul style={{ margin: '0.5rem 0', paddingLeft: '1.5rem', fontSize: '0.85rem' }}>
+                                {rule.affectedTransactionIds.map(tid => {
+                                  const t = transactions.find(tr => tr.id === tid)
+                                  if (!t) return null
+                                  return (
+                                    <li key={tid} style={{ marginBottom: '4px' }}>
+                                      <span style={{ color: '#666' }}>{format(t.date, 'dd MMM')}</span> - {t.description}
+                                      <span style={{ float: 'right' }}>R {Math.abs(t.amount).toFixed(2)}</span>
+                                    </li>
+                                  )
+                                })}
+                              </ul>
+                            </div>
+                          </td>
                         </tr>
-                      </thead>
-                      <tbody>
-                        {items.map(t => (
-                          <tr key={t.id} style={{ borderBottom: '1px solid #fcfcfc' }}>
-                            <td style={{ padding: '8px' }}>
-                              <input
-                                type="checkbox"
-                                checked={selectedReviewIds.has(t.id!)}
-                                onChange={() => toggleReviewSelection(t.id!)}
-                                style={{ width: '16px', height: '16px', cursor: 'pointer' }}
-                              />
-                            </td>
-                            <td style={{ padding: '8px' }}>
-                              <input
-                                type="checkbox"
-                                checked={selectedRuleIds.has(t.id!)}
-                                onChange={() => toggleRuleSelection(t.id!)}
-                                style={{ width: '16px', height: '16px', cursor: 'pointer' }}
-                              />
-                            </td>
-                            <td style={{ padding: '8px', color: '#666' }}>{format(t.date, 'dd MMM')}</td>
-                            <td style={{ padding: '8px' }}>{t.description}</td>
-                            <td style={{ padding: '8px', color: '#7c4dff', fontWeight: 500 }}>
-                              {t.suggestedMerchant}
-                            </td>
-                            <td style={{ padding: '8px', textAlign: 'right' }}>
-                              R {Math.abs(t.amount).toFixed(2)}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                );
-              })}
+                      )}
+                    </React.Fragment>
+                  ))}
+                </tbody>
+              </table>
             </div>
 
             <div className="form-actions" style={{
@@ -1115,30 +1127,18 @@ export default function Transactions() {
               background: 'white',
               zIndex: 10
             }}>
-              <div style={{ flex: 1, color: '#666' }}>
-                {selectedReviewIds.size} transactions will be approved. <br />
-                {selectedRuleIds.size} new mapping rules will be saved.
-              </div>
-              <button
-                onClick={handleBulkApprove}
-                className="btn-primary"
-                style={{ backgroundColor: '#7c4dff' }}
-              >
-                Approve & Save Rules
-              </button>
               <button
                 type="button"
                 className="btn-outline"
                 onClick={() => setShowAIReview(false)}
               >
-                Cancel
+                Close
               </button>
             </div>
           </div>
         </div>
       )}
-
-    </div >
+    </div>
   )
 }
 

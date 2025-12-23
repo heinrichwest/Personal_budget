@@ -1,0 +1,90 @@
+.dashboard-report {
+    margin-top: 2rem;
+    background-color: white;
+    padding: 2rem;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(18, 38, 94, 0.1);
+}
+
+.dashboard-report h2 {
+    color: var(--color-primary);
+    margin-bottom: 2rem;
+    font-size: 1.5rem;
+}
+
+.report-section {
+    margin-bottom: 2.5rem;
+}
+
+.section-title {
+    color: var(--color-secondary);
+    border-bottom: 2px solid #eee;
+    padding-bottom: 0.5rem;
+    margin-bottom: 1rem;
+    font-size: 1.2rem;
+}
+
+.report-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.95rem;
+}
+
+.report-table th,
+.report-table td {
+    padding: 0.75rem 1rem;
+    text-align: left;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.report-table th {
+    font-weight: 600;
+    color: #666;
+    background-color: #f9fafb;
+}
+
+.report-table .num-col {
+    text-align: right;
+    font-family: 'Inter', monospace;
+    /* Monospace for numbers alignment */
+}
+
+.report-table .budget-cell {
+    background-color: #fcfcfc;
+    color: #555;
+    font-weight: 500;
+}
+
+.subtotal-row {
+    background-color: #f8f9fa;
+    font-weight: 700;
+    border-top: 2px solid #e1e4e8;
+}
+
+.subtotal-row td {
+    color: var(--color-primary);
+}
+
+.over-budget-text {
+    color: #d32f2f;
+    font-weight: 500;
+}
+
+.unmapped-section {
+    background-color: #fff8f8;
+    padding: 1rem;
+    border-radius: 6px;
+    border: 1px solid #ffebee;
+}
+
+.unmapped-section .section-title {
+    border-bottom-color: #ffcdd2;
+    color: #d32f2f;
+}
+
+.loading-report {
+    padding: 2rem;
+    text-align: center;
+    color: #666;
+    font-style: italic;
+}
