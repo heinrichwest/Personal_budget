@@ -1,0 +1,85 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper function to check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Helper function to check if user is the owner
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    // Helper function to check if user is admin or system admin
+    function isAdmin() {
+      return isAuthenticated() && 
+        (
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'systemadmin'] ||
+          // Fallback for bootstrap: explicit email check for system admin
+          request.auth.token.email == 'hein@speccon.co.za'
+        );
+    }
+    
+    // Helper function to check if user is system admin
+    function isSystemAdmin() {
+      return isAuthenticated() && 
+        (
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'systemadmin' ||
+          request.auth.token.email == 'hein@speccon.co.za'
+        );
+    }
+    
+    // Users collection
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      // Allow creation users. Optionally restrict role setting here, but for now allow correct bootstrapping.
+      allow create: if isAuthenticated() && request.auth.uid == userId;
+      // Users can update their own profile, but NOT their role (unless they are admin)
+      allow update: if (isOwner(userId) && request.resource.data.role == resource.data.role) || isAdmin();
+      allow delete: if isSystemAdmin();
+    }
+    
+    // Budgets collection
+    // Query constraints must match these rules
+    match /budgets/{budgetId} {
+      allow read: if isAuthenticated() && (isOwner(resource.data.userId) || isAdmin());
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && (isOwner(resource.data.userId) || isAdmin());
+      allow delete: if isAuthenticated() && (isOwner(resource.data.userId) || isAdmin());
+    }
+    
+    // Transactions collection
+    match /transactions/{transactionId} {
+      allow read: if isAuthenticated() && (isOwner(resource.data.userId) || isAdmin());
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && (isOwner(resource.data.userId) || isAdmin());
+      allow delete: if isAuthenticated() && (isOwner(resource.data.userId) || isAdmin());
+    }
+    
+    // Bank statements collection
+    match /bankStatements/{statementId} {
+      allow read: if isAuthenticated() && (isOwner(resource.data.userId) || isAdmin());
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && (isOwner(resource.data.userId) || isAdmin());
+      allow delete: if isAuthenticated() && (isOwner(resource.data.userId) || isAdmin());
+    }
+    
+    // Transaction mappings collection
+    // Mappings are shared knowledge, so allow any authenticated user to read/write/update
+    // This solves the issue where User B maps a transaction User A already mapped
+    match /transactionMappings/{mappingId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated();
+      allow delete: if isAdmin(); // Only admins should delete mappings globaly
+    }
+    
+    // System configuration (only system admin)
+    match /systemConfig/{configId} {
+      allow read: if isAuthenticated();
+      allow write: if isSystemAdmin();
+    }
+  }
+}
+
