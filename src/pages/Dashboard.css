@@ -1,3 +1,9 @@
+.dashboard-container {
+  max-width: 98%;
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+
 .dashboard-settings-panel {
   background-color: white;
   padding: 1.5rem;

@@ -33,6 +33,59 @@ interface BankStatement {
   transactionCount: number
 }
 
+// Helper to robustly parse dates (handling DD/MM/YYYY which JS often fails on vs MM/DD/YYYY)
+// Helper to robustly parse dates (handling DD/MM/YYYY which JS often fails on vs MM/DD/YYYY)
+// Helper to robustly parse dates (handling DD/MM/YYYY which JS often fails on vs MM/DD/YYYY)
+function parseRobustDate(dateInput: any): Date | null {
+  if (!dateInput) return null
+  const dateStr = String(dateInput).trim()
+
+  // 1. Try "DD MM YYYY" (Space separated) - explicit request
+  const spaceMatch = dateStr.match(/^(\d{1,2})\s+(\d{1,2})\s+(\d{4})/)
+  if (spaceMatch) {
+    const day = parseInt(spaceMatch[1])
+    const month = parseInt(spaceMatch[2]) - 1
+    const year = parseInt(spaceMatch[3])
+    const d = new Date(year, month, day)
+    if (d.getFullYear() === year && d.getMonth() === month && d.getDate() === day) return d
+  }
+
+  // 2. Try standard ISO (YYYY-MM-DD or YYYY/MM/DD)
+  const isoMatch = dateStr.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})/)
+  if (isoMatch) {
+    return new Date(dateStr)
+  }
+
+  // 3. Try DD/MM/YYYY or DD-MM-YYYY
+  const dmMatch = dateStr.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/)
+  if (dmMatch) {
+    const day = parseInt(dmMatch[1])
+    const month = parseInt(dmMatch[2]) - 1 // JS months are 0-indexed
+    const year = parseInt(dmMatch[3])
+    const d = new Date(year, month, day)
+    // Validate
+    if (d.getFullYear() === year && d.getMonth() === month && d.getDate() === day) {
+      return d
+    }
+  }
+
+  // 4. Fallback/Standard
+  const d = new Date(dateStr)
+  if (!isNaN(d.getTime())) {
+    return d
+  }
+
+  // 5. Try YYYYMMDD
+  if (/^\d{8}$/.test(dateStr)) {
+    const year = parseInt(dateStr.substring(0, 4))
+    const month = parseInt(dateStr.substring(4, 6)) - 1
+    const day = parseInt(dateStr.substring(6, 8))
+    return new Date(year, month, day)
+  }
+
+  return null
+}
+
 export default function Transactions() {
   const { currentUser } = useAuth()
   const [transactions, setTransactions] = useState<Transaction[]>([])
@@ -45,8 +98,10 @@ export default function Transactions() {
   const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null)
   const [searchTerm, setSearchTerm] = useState('')
   const [categories, setCategories] = useState<Array<{ id: string; name: string }>>([])
+  const [categoriesLoading, setCategoriesLoading] = useState(true)
   const [showUnmappedOnly, setShowUnmappedOnly] = useState(false)
   const [showAIReview, setShowAIReview] = useState(false)
+  const [sortConfig, setSortConfig] = useState<{ field: keyof Transaction, direction: 'asc' | 'desc' } | null>(null)
 
   useEffect(() => {
     if (!currentUser) return
@@ -82,7 +137,8 @@ export default function Transactions() {
           const data = doc.data()
           const defaults = data.defaultCategories || []
 
-          defaults.forEach((name: string) => {
+          defaults.forEach((def: any) => {
+            const name = typeof def === 'string' ? def : def.name
             const cleanName = name.trim()
             if (!userCatNames.has(cleanName.toLowerCase())) {
               userCatNames.add(cleanName.toLowerCase()) // prevent duplicates
@@ -111,6 +167,8 @@ export default function Transactions() {
       setCategories(uniqueCats)
     } catch (error) {
       console.error('Error loading categories:', error)
+    } finally {
+      setCategoriesLoading(false)
     }
   }
 
@@ -401,25 +459,47 @@ export default function Transactions() {
         if (isNaN(debitVal) && isNaN(creditVal)) continue
 
         const amount = (Math.abs(creditVal || 0) - Math.abs(debitVal || 0))
-        const date = new Date(dateStr)
+
+        let date = parseRobustDate(dateStr)
         const description = String(descStr || '').trim()
 
-        if (isNaN(date.getTime()) || !description) {
+        if (!date || isNaN(date.getTime()) || !description) {
+          console.warn(`Skipping invalid row: Date='${dateStr}', Desc='${description}'`)
           continue
         }
 
-        // 2. Rule-based lookup (Contains match with normalization)
+        // 2. Rule-based lookup 
         let mappedDescription = description
         let categoryId: string | undefined
 
         const normalizedDesc = normalizeMatchText(description)
 
-        // Find the first rule that matches
-        const match = mappings.find(m => normalizedDesc.includes(m.rule))
+        // Priority 1: Exact Match (Case-insensitive)
+        let exactMatch = mappings.find(m => normalizedDesc === m.rule.toLowerCase())
+
+        // Priority 2: Partial Match (Contains) - Only if no exact match
+        let match = exactMatch
+        if (!match) {
+          match = mappings.find(m => normalizedDesc.includes(m.rule))
+        }
 
         if (match) {
           mappedDescription = match.mappedDescription || description
           categoryId = match.categoryId
+        }
+
+        // Resolve Category Name
+        let categoryName: string | undefined
+        if (categoryId) {
+          if (categoryId.startsWith('NEW:')) {
+            categoryName = categoryId.substring(4)
+          } else {
+            // Look up in loaded categories
+            const cat = categories.find(c => c.id === categoryId)
+            if (cat) {
+              categoryName = cat.name
+            }
+          }
         }
 
         // Construct object specifically to avoid undefined values which Firestore rejects
@@ -435,6 +515,9 @@ export default function Transactions() {
         // Only add categoryId if it exists (is not undefined/null/empty)
         if (categoryId) {
           newTrans.categoryId = categoryId
+          if (categoryName) {
+            newTrans.categoryName = categoryName
+          }
         }
 
         transactionsToAdd.push(newTrans)
@@ -475,6 +558,57 @@ export default function Transactions() {
       setUploading(false)
       setUploadProgress(0)
       e.target.value = ''
+    }
+  }
+
+  async function handleClearData() {
+    if (!currentUser) return
+    if (!window.confirm("Are you sure you want to clear ALL transactions and bank statements? This cannot be undone.")) {
+      return
+    }
+
+    setLoading(true)
+    try {
+      const batchSize = 500
+
+      // 1. Delete Transactions
+      const transQ = query(collection(db, 'transactions'), where('userId', '==', currentUser.uid))
+      const transSnapshot = await getDocs(transQ)
+
+      const transChunks = []
+      for (let i = 0; i < transSnapshot.docs.length; i += batchSize) {
+        transChunks.push(transSnapshot.docs.slice(i, i + batchSize))
+      }
+
+      for (const chunk of transChunks) {
+        const batch = writeBatch(db)
+        chunk.forEach(doc => batch.delete(doc.ref))
+        await batch.commit()
+      }
+
+      // 2. Delete Bank Statements
+      const stmtQ = query(collection(db, 'bankStatements'), where('userId', '==', currentUser.uid))
+      const stmtSnapshot = await getDocs(stmtQ)
+
+      const stmtChunks = []
+      for (let i = 0; i < stmtSnapshot.docs.length; i += batchSize) {
+        stmtChunks.push(stmtSnapshot.docs.slice(i, i + batchSize))
+      }
+
+      for (const chunk of stmtChunks) {
+        const batch = writeBatch(db)
+        chunk.forEach(doc => batch.delete(doc.ref))
+        await batch.commit()
+      }
+
+      setTransactions([])
+      setStatements([])
+      alert("All data cleared successfully.")
+    } catch (error) {
+      console.error("Error clearing data:", error)
+      alert("Failed to clear data.")
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -594,6 +728,14 @@ export default function Transactions() {
     }
   }
 
+  const handleSort = (field: keyof Transaction) => {
+    let direction: 'asc' | 'desc' = 'asc'
+    if (sortConfig && sortConfig.field === field && sortConfig.direction === 'asc') {
+      direction = 'desc'
+    }
+    setSortConfig({ field, direction })
+  }
+
   const filteredTransactions = transactions.filter(transaction => {
     const search = searchTerm.toLowerCase()
     const matchesSearch = (
@@ -601,17 +743,48 @@ export default function Transactions() {
       (transaction.mappedDescription || '').toLowerCase().includes(search) ||
       (transaction.categoryName || '').toLowerCase().includes(search)
     )
+
+    // Updated unmapped logic to be more strictly "No Category assigned"
+    // so we don't accidentally hide items that just have suggestions
     const matchesUnmapped = showUnmappedOnly ? !transaction.categoryId : true
 
     return matchesSearch && matchesUnmapped
   })
 
+  if (sortConfig !== null) {
+    filteredTransactions.sort((a, b) => {
+      let valA: any = a[sortConfig.field]
+      let valB: any = b[sortConfig.field]
+
+      // Handle calculated/display fields
+      if (sortConfig.field === 'mappedDescription') {
+        valA = a.mappedDescription || a.suggestedMerchant || ''
+        valB = b.mappedDescription || b.suggestedMerchant || ''
+      } else if (sortConfig.field === 'categoryName') {
+        valA = a.categoryName || a.suggestedCategoryName || ''
+        valB = b.categoryName || b.suggestedCategoryName || ''
+      }
+
+      if (valA === undefined && valB === undefined) return 0
+      if (valA === undefined) return 1
+      if (valB === undefined) return -1
+
+      if (valA < valB) {
+        return sortConfig.direction === 'asc' ? -1 : 1
+      }
+      if (valA > valB) {
+        return sortConfig.direction === 'asc' ? 1 : -1
+      }
+      return 0
+    })
+  }
+
   const unmappedCount = transactions.filter(t => !t.categoryId).length
 
   // Modal State
   const [matchRuleInput, setMatchRuleInput] = useState('')
-  const [saveRule, setSaveRule] = useState(true)
-  const [updateSimilar, setUpdateSimilar] = useState(true)
+  const [saveRule, setSaveRule] = useState(false)
+  const [updateSimilar, setUpdateSimilar] = useState(false)
 
   // Rule Proposal State
   interface ProposedRule {
@@ -630,8 +803,8 @@ export default function Transactions() {
   useEffect(() => {
     if (selectedTransaction) {
       setMatchRuleInput(selectedTransaction.description)
-      setSaveRule(true)
-      setUpdateSimilar(true)
+      setSaveRule(false)
+      setUpdateSimilar(false)
     }
   }, [selectedTransaction])
 
@@ -741,19 +914,32 @@ export default function Transactions() {
         <div>
           <h1>Transactions</h1>
           <p>Upload bank statements and map transactions to budget categories</p>
+          <div style={{ fontSize: '0.85rem', color: '#666', marginTop: '0.5rem', backgroundColor: '#e3f2fd', padding: '0.5rem', borderRadius: '4px', border: '1px solid #bbdefb' }}>
+            ℹ️ CSV must include columns for <strong>Date</strong>, <strong>Description</strong>, and <strong>Amount</strong> (or Debits/Credits).
+          </div>
         </div>
-        <label className="file-upload-label" style={{ marginTop: '0.5rem' }}>
-          <input
-            type="file"
-            accept=".csv"
-            onChange={handleFileUpload}
-            disabled={uploading}
-            style={{ display: 'none' }}
-          />
-          <span className="btn-primary">
-            {uploading ? 'Uploading...' : 'Upload CSV'}
-          </span>
-        </label>
+        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', marginTop: '0.5rem' }}>
+          <button
+            onClick={handleClearData}
+            className="btn-outline"
+            disabled={uploading || transactions.length === 0}
+            style={{ color: '#d32f2f', borderColor: '#d32f2f' }}
+          >
+            Clear Data
+          </button>
+          <label className="file-upload-label" style={{ margin: 0 }}>
+            <input
+              type="file"
+              accept=".csv"
+              onChange={handleFileUpload}
+              disabled={uploading || categoriesLoading}
+              style={{ display: 'none' }}
+            />
+            <span className={`btn-primary ${categoriesLoading ? 'disabled' : ''}`}>
+              {uploading ? 'Uploading...' : categoriesLoading ? 'Loading System...' : 'Upload CSV'}
+            </span>
+          </label>
+        </div>
       </div>
 
       {transactions.length > 0 && (
@@ -829,11 +1015,21 @@ export default function Transactions() {
             <table>
               <thead>
                 <tr>
-                  <th>Date</th>
-                  <th>Description</th>
-                  <th>Mapped To</th>
-                  <th>Category</th>
-                  <th>Amount</th>
+                  <th onClick={() => handleSort('date')} style={{ cursor: 'pointer' }}>
+                    Date {sortConfig?.field === 'date' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
+                  </th>
+                  <th onClick={() => handleSort('description')} style={{ cursor: 'pointer' }}>
+                    Description {sortConfig?.field === 'description' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
+                  </th>
+                  <th onClick={() => handleSort('mappedDescription')} style={{ cursor: 'pointer' }}>
+                    Mapped To {sortConfig?.field === 'mappedDescription' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
+                  </th>
+                  <th onClick={() => handleSort('categoryName')} style={{ cursor: 'pointer' }}>
+                    Category {sortConfig?.field === 'categoryName' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
+                  </th>
+                  <th onClick={() => handleSort('amount')} style={{ cursor: 'pointer' }}>
+                    Amount {sortConfig?.field === 'amount' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
+                  </th>
                   <th>Actions</th>
                 </tr>
               </thead>

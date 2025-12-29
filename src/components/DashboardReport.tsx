@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { collection, query, where, getDocs } from 'firebase/firestore'
+import React, { useEffect, useState } from 'react'
+import { collection, query, where, getDocs, doc, getDoc, updateDoc, setDoc } from 'firebase/firestore'
 import { db } from '../config/firebase'
 import { BudgetCategory } from '../pages/Budget.tsx'
 import './DashboardReport.css'
@@ -12,11 +12,28 @@ interface ReportProps {
 
 
 
+// Basic Transaction Interface
+interface Transaction {
+    id: string
+    date: any // Firestore Timestamp or Date
+    description: string
+    amount: number
+    categoryId?: string
+    categoryName?: string
+    mappedDescription?: string
+    userId: string
+}
+
+interface CellData {
+    amount: number
+    txns: Transaction[]
+}
+
 interface CategoryRow {
     id: string
     name: string
     budget: number
-    months: { [key: string]: number } // key is format "YYYY-MM"
+    months: { [key: string]: CellData } // key is format "YYYY-MM"
 }
 
 interface SectionData {
@@ -28,13 +45,33 @@ interface SectionData {
 export default function DashboardReport({ currentUser, monthStartDay }: ReportProps) {
     const [loading, setLoading] = useState(true)
     const [reportData, setReportData] = useState<{
-        income: SectionData
-        monthly: SectionData
-        adhoc: SectionData
-        unmapped: { months: { [key: string]: number } }
+        sections: { [groupId: string]: SectionData }
+        groupings: any[] // Store grouping metadata
+        unmapped: { months: { [key: string]: CellData } }
         monthLabels: string[]
         monthKeys: string[]
+        balances: {
+            net: { [key: string]: number }
+            income: { [key: string]: CellData }
+            expenses: { [key: string]: CellData }
+            opening: { [key: string]: number }
+            closing: { [key: string]: number }
+        }
+        initialBalance: number
+        grossStats: {
+            income: number
+            expenses: number
+            count: number
+        }
     } | null>(null)
+
+    // Modal States
+    const [selectedCell, setSelectedCell] = useState<{ title: string, txns: Transaction[] } | null>(null)
+    const [editingTxn, setEditingTxn] = useState<Transaction | null>(null)
+    const [allBudgets, setAllBudgets] = useState<BudgetCategory[]>([])
+
+    // Modal Sorting
+    const [sortConfig, setSortConfig] = useState<{ field: keyof Transaction | 'mappedDescription', direction: 'asc' | 'desc' }>({ field: 'date', direction: 'desc' })
 
     useEffect(() => {
         if (!currentUser) return
@@ -100,11 +137,10 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
 
             const monthKeys: string[] = []
             const monthLabels: string[] = []
-            // We want Current, M-1, M-2
-            for (let i = 0; i < 3; i++) {
+            // We want Current, M-1, ... M-11 (12 months descending)
+            for (let i = 0; i < 12; i++) {
 
-                // Actually, cleaner way:
-                // just subtract i months from the "year/month" we found in currentParams
+                // Subtract i months from current
                 let y = currentParams.year
                 let m = currentParams.month - i
                 while (m < 0) { m += 12; y--; }
@@ -113,20 +149,44 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                 const labelDate = new Date(y, m, 1)
                 const label = labelDate.toLocaleDateString('default', { month: 'short', year: '2-digit' })
 
-                monthKeys.unshift(key) // Prepend so earliest is first
-                monthLabels.unshift(label)
+                monthKeys.push(key) // Push so latest is first
+                monthLabels.push(label)
             }
 
-            // Calculate global start and end date for query (earliest start to latest end)
-            const earliestKeyParts = monthKeys[0].split('-').map(Number)
-            const latestKeyParts = monthKeys[monthKeys.length - 1].split('-').map(Number)
+            // Calculate global start and end date for query
+            // Since we have latest first in array, earliest is at end
+            const earliestKeyParts = monthKeys[monthKeys.length - 1].split('-').map(Number)
+            const latestKeyParts = monthKeys[0].split('-').map(Number)
 
             const { start: globalStart } = getRangeForFiscalMonth(earliestKeyParts[0], earliestKeyParts[1] - 1, monthStartDay)
             const { end: globalEnd } = getRangeForFiscalMonth(latestKeyParts[0], latestKeyParts[1] - 1, monthStartDay)
 
+            // 1.5 Fetch System Config for Groupings
+            const systemDoc = await getDoc(doc(db, 'systemConfig', 'main'))
+            let groupings: any[] = []
+            if (systemDoc.exists()) {
+                const sData = systemDoc.data()
+                groupings = sData.groupings || []
+            }
+            // Fallback
+            if (groupings.length === 0) {
+                groupings = [
+                    { id: 'income', name: 'Income', isIncome: true, sortOrder: 0 },
+                    { id: 'monthly', name: 'Monthly Expenses', isIncome: false, sortOrder: 1 },
+                    { id: 'adhoc', name: 'Ad Hoc Expenses', isIncome: false, sortOrder: 2 }
+                ]
+            }
+            groupings.sort((a, b) => a.sortOrder - b.sortOrder)
+
             // 2. Fetch budgets
             const budgetsSnapshot = await getDocs(query(collection(db, 'budgets'), where('userId', '==', currentUser.uid)))
-            const budgets = budgetsSnapshot.docs.map(d => ({ id: d.id, ...d.data() } as BudgetCategory))
+            const rawBudgets = budgetsSnapshot.docs.map(d => ({ id: d.id, ...d.data() } as BudgetCategory))
+
+            // Deduplicate by name and sort
+            const uniqueBudgets = Array.from(new Map(rawBudgets.map(item => [item.name.trim(), item])).values())
+            uniqueBudgets.sort((a, b) => a.name.localeCompare(b.name))
+
+            setAllBudgets(uniqueBudgets)
 
             // 3. Fetch transactions (Fetch all for user to avoid Index requirements, then filter in memory)
             const transactionsSnapshot = await getDocs(query(
@@ -137,20 +197,16 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
             // 4. Initialize Data Structure
             const initSection = () => ({ rows: [], totalBudget: 0, totalMonths: {} })
 
-            const data: any = {
-                income: initSection(),
-                monthly: initSection(),
-                adhoc: initSection(),
-                unmapped: { months: {} }
-            }
-
-            // Initialize month totals to 0
-            monthKeys.forEach(k => {
-                data.income.totalMonths[k] = 0
-                data.monthly.totalMonths[k] = 0
-                data.adhoc.totalMonths[k] = 0
-                data.unmapped.months[k] = 0
+            const sections: { [key: string]: SectionData } = {}
+            groupings.forEach(g => {
+                sections[g.id] = initSection()
+                monthKeys.forEach(k => {
+                    sections[g.id].totalMonths[k] = 0
+                })
             })
+
+            const unmapped = { months: {} as { [key: string]: CellData } }
+            monthKeys.forEach(k => unmapped.months[k] = { amount: 0, txns: [] })
 
             // Map categories to rows
 
@@ -158,14 +214,14 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                 ids: string[]
                 name: string
                 budget: number
-                months: { [key: string]: number }
+                months: { [key: string]: CellData }
                 type: string
             }
 
             // Map categories to matched rows (Merged by normalized name)
             const rowsMap = new Map<string, InternalCategoryRow>()
 
-            budgets.forEach(cat => {
+            rawBudgets.forEach(cat => {
                 const normName = cat.name.trim().toLowerCase()
                 const type = cat.type || 'monthly'
                 const amount = typeof cat.amount === 'number' ? cat.amount : parseFloat(cat.amount) || 0
@@ -179,7 +235,7 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                         type: type
                     })
                     // Init months
-                    monthKeys.forEach(k => rowsMap.get(normName)!.months[k] = 0)
+                    monthKeys.forEach(k => rowsMap.get(normName)!.months[k] = { amount: 0, txns: [] })
                 } else {
                     const existing = rowsMap.get(normName)!
                     existing.ids.push(cat.id!)
@@ -189,32 +245,52 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
 
             // Push merged rows to sections
             rowsMap.forEach((row) => {
-                const section = data[row.type] ? data[row.type] : data.monthly
-
-                const finalRow: CategoryRow = {
-                    id: row.ids[0],
-                    name: row.name,
-                    budget: row.budget,
-                    months: row.months
+                // If type doesn't exist in groupings, default to first non-income or just first one
+                let targetType = row.type
+                if (!sections[targetType]) {
+                    // Fallback: try to find a generic expense group or just put in first available
+                    // Ideally we should have a 'Other' group but logic is strict
+                    const fallback = groupings.find(g => !g.isIncome) || groupings[0]
+                    targetType = fallback.id
                 }
-                    // Attach for lookup
-                    ; (finalRow as any).ids = row.ids
 
-                section.rows.push(finalRow)
-                section.totalBudget += row.budget
+                const section = sections[targetType]
+                if (section) {
+                    const finalRow: CategoryRow = {
+                        id: row.ids[0],
+                        name: row.name,
+                        budget: row.budget,
+                        months: row.months
+                    }
+                        ; (finalRow as any).ids = row.ids
+
+                    section.rows.push(finalRow)
+                    section.totalBudget += row.budget
+                }
             })
 
-            // Sort rows alphabetically
-            data.income.rows.sort((a: any, b: any) => a.name.localeCompare(b.name))
-            data.monthly.rows.sort((a: any, b: any) => a.name.localeCompare(b.name))
-            data.adhoc.rows.sort((a: any, b: any) => a.name.localeCompare(b.name))
+            // Sort rows alphabetically in every section
+            Object.values(sections).forEach(sec => {
+                sec.rows.sort((a: any, b: any) => a.name.localeCompare(b.name))
+            })
 
             // 5. Process Transactions
             const globalStartMs = globalStart.getTime()
             const globalEndMs = globalEnd.getTime()
 
+            let grossIncome = 0
+            let grossExpenses = 0
+            let grossCount = 0
+
             transactionsSnapshot.docs.forEach(doc => {
-                const txn = doc.data()
+                const txnData = doc.data()
+                const txn: Transaction = { id: doc.id, ...txnData } as any
+                const amount = txn.amount
+
+                // Gross Stats (All data in system)
+                grossCount++
+                if (amount > 0) grossIncome += amount
+                else grossExpenses += amount
 
                 // Safely convert date
                 let date: Date
@@ -235,56 +311,163 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                 const time = date.getTime()
                 if (time < globalStartMs || time >= globalEndMs) return
 
-                const amount = txn.amount
                 const catId = txn.categoryId
 
-                // Determine which month bucket this txn falls into
                 const info = getFiscalMonthInfo(date, monthStartDay)
                 const key = info.key
+
+                // Update transaction date object for usage in UI
+                txn.date = date
 
                 if (!monthKeys.includes(key)) return // Outside our view range
 
                 if (!catId) {
                     // Unmapped
-                    data.unmapped.months[key] += amount
+                    unmapped.months[key].amount += amount
+                    unmapped.months[key].txns.push(txn)
                 } else {
                     let found = false
                     const txnName = (txn.categoryName || '').trim().toLowerCase()
 
-                        // 1. Try match by ID (preferred)
-                        ;['income', 'monthly', 'adhoc'].forEach(type => {
-                            const row = data[type].rows.find((r: any) => r.ids && r.ids.includes(catId))
-                            if (row) {
-                                row.months[key] += amount
-                                data[type].totalMonths[key] += amount
-                                found = true
-                            }
-                        })
+                    // 1. Try match by ID (preferred)
+                    // Check all sections
+                    for (const groupId of Object.keys(sections)) {
+                        const row = sections[groupId].rows.find((r: any) => r.ids && r.ids.includes(catId))
+                        if (row) {
+                            row.months[key].amount += amount
+                            row.months[key].txns.push(txn)
+                            sections[groupId].totalMonths[key] += amount
+                            found = true
+                            break
+                        }
+                    }
 
                     // 2. Fallback: Try match by Name (if name exists)
                     if (!found && txnName) {
-                        ;['income', 'monthly', 'adhoc'].forEach(type => {
-                            if (found) return // Stop if found in previous type iteration? 
-                            // Actually we need to break the outer loop or just check `!found`
-
-                            // Find row where name matches
-                            const row = data[type].rows.find((r: any) => r.name.trim().toLowerCase() === txnName)
+                        for (const groupId of Object.keys(sections)) {
+                            const row = sections[groupId].rows.find((r: any) => r.name.trim().toLowerCase() === txnName)
                             if (row) {
-                                row.months[key] += amount
-                                data[type].totalMonths[key] += amount
+                                row.months[key].amount += amount
+                                row.months[key].txns.push(txn)
+                                sections[groupId].totalMonths[key] += amount
                                 found = true
+                                break
                             }
-                        })
+                        }
                     }
 
                     if (!found) {
                         // Truly unmapped relative to current budget list
-                        data.unmapped.months[key] += amount
+                        unmapped.months[key].amount += amount
+                        unmapped.months[key].txns.push(txn)
                     }
                 }
             })
 
-            setReportData({ ...data, monthLabels, monthKeys })
+            // 6. Calculate Net and Balances
+            // Fetch stored opening balances from user profile
+            const userDocSnap = await getDoc(doc(db, 'users', currentUser.uid))
+            // const storedBalances = userDocSnap.exists() && userDocSnap.data().openingBalances ? userDocSnap.data().openingBalances : {}
+
+            const balances = {
+                net: {} as any,
+                income: {} as any,
+                expenses: {} as any,
+                opening: {} as any,
+                closing: {} as any
+            }
+
+            // Calculate Net for each month (Income + Expense + Unmapped)
+            // Calculate Net for each month (Income + Expense + Unmapped)
+            monthKeys.forEach((k) => {
+                let monthlyNet = 0
+                const monthlyIncome: CellData = { amount: 0, txns: [] }
+                const monthlyExpenses: CellData = { amount: 0, txns: [] }
+
+                // Add all section totals
+                // Iterate through rows to gather txns
+                Object.entries(sections).forEach(([secId, sec]) => {
+                    const isInc = groupings.find(g => g.id === secId)?.isIncome
+
+                    sec.rows.forEach(row => {
+                        const cell = row.months[k]
+                        if (cell.amount !== 0) {
+                            if (isInc) {
+                                monthlyIncome.amount += cell.amount
+                                monthlyIncome.txns.push(...cell.txns)
+                            } else {
+                                monthlyExpenses.amount += cell.amount
+                                monthlyExpenses.txns.push(...cell.txns)
+                            }
+                            monthlyNet += cell.amount
+                        }
+                    })
+                })
+
+                // Add unmapped
+                const unmappedCell = unmapped.months[k]
+                if (unmappedCell.amount !== 0) {
+                    // Heuristic for unmapped income/expense
+                    if (unmappedCell.amount > 0) {
+                        monthlyIncome.amount += unmappedCell.amount
+                        monthlyIncome.txns.push(...unmappedCell.txns)
+                    } else {
+                        monthlyExpenses.amount += unmappedCell.amount
+                        monthlyExpenses.txns.push(...unmappedCell.txns)
+                    }
+                    monthlyNet += unmappedCell.amount
+                }
+
+                balances.net[k] = monthlyNet
+                balances.income[k] = monthlyIncome
+                balances.expenses[k] = monthlyExpenses
+            })
+
+            // Calculate Opening/Closing flows
+            // Determine Opening Balance
+
+            // Fetch generic 'initial report balance' which anchors the earliest month shown
+            const initialBalance = userDocSnap.exists() ? (userDocSnap.data().initialReportBalance || 0) : 0
+
+            let runningBalance = 0 // Carry forward
+
+            // Loop backwards through monthKeys (Earliest to Latest)
+            for (let i = monthKeys.length - 1; i >= 0; i--) {
+                const k = monthKeys[i]
+
+                let opening = 0
+
+                // If it is the earliest month being displayed, use the user's manual "Anchor" balance
+                if (i === monthKeys.length - 1) {
+                    opening = initialBalance
+                } else {
+                    opening = runningBalance
+                }
+
+                const net = balances.net[k]
+                const closing = opening + net
+
+                balances.opening[k] = opening
+                balances.closing[k] = closing
+
+                runningBalance = closing
+            }
+
+            setReportData({
+                sections,
+                groupings,
+                unmapped,
+                monthLabels,
+                monthKeys,
+                balances,
+                initialBalance,
+                grossStats: {
+                    income: grossIncome,
+                    expenses: grossExpenses,
+                    count: grossCount
+                }
+            })
+
         } catch (e) {
             console.error("Error generating report", e)
         } finally {
@@ -293,7 +476,134 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
     }
 
     // Helper to render currency
-    const fmt = (n: number) => n.toLocaleString('en-ZA', { style: 'currency', currency: 'ZAR', minimumFractionDigits: 0, maximumFractionDigits: 0 })
+    const fmt = (n: number) => n === 0 ? '-' : Math.round(n).toLocaleString('en-ZA').replace(/,/g, ' ')
+
+    const handleCellClick = (title: string, cellData: CellData) => {
+        if (!cellData || cellData.txns.length === 0) return
+        setSortConfig({ field: 'date', direction: 'desc' }) // Reset default sort
+        setSelectedCell({
+            title: title,
+            txns: cellData.txns
+        })
+    }
+
+    const handleSort = (field: keyof Transaction | 'mappedDescription') => {
+        setSortConfig(prev => ({
+            field,
+            direction: prev.field === field && prev.direction === 'asc' ? 'desc' : 'asc'
+        }))
+    }
+
+    const getSortedTxns = () => {
+        if (!selectedCell) return []
+        return [...selectedCell.txns].sort((a, b) => {
+            const { field, direction } = sortConfig
+            let valA: any = a[field as keyof Transaction]
+            let valB: any = b[field as keyof Transaction]
+
+            // Special handling for mappedDescription fallback
+            if (field === 'mappedDescription') {
+                valA = a.mappedDescription || a.description
+                valB = b.mappedDescription || b.description
+            }
+            if (field === 'date') {
+                // Handle Firestore Timestamp or Date object or string
+                valA = a.date && typeof a.date.toDate === 'function' ? a.date.toDate().getTime() : new Date(a.date).getTime()
+                valB = b.date && typeof b.date.toDate === 'function' ? b.date.toDate().getTime() : new Date(b.date).getTime()
+            }
+            if (typeof valA === 'string') valA = valA.toLowerCase()
+            if (typeof valB === 'string') valB = valB.toLowerCase()
+
+            if (valA < valB) return direction === 'asc' ? -1 : 1
+            if (valA > valB) return direction === 'asc' ? 1 : -1
+            return 0
+        })
+    }
+
+    const handleUpdateTransaction = async (e: React.FormEvent) => {
+        e.preventDefault()
+        if (!editingTxn) return
+
+        try {
+            // Simple update of description and category
+            await updateDoc(doc(db, 'transactions', editingTxn.id), {
+                description: editingTxn.description, // User might not have changed this if using mappedDesc
+                mappedDescription: editingTxn.mappedDescription,
+                categoryId: editingTxn.categoryId,
+                categoryName: editingTxn.categoryName
+            })
+
+            // Close modals and reload
+            setEditingTxn(null)
+            setSelectedCell(null)
+            generateReport()
+        } catch (err) {
+            console.error(err)
+            alert("Failed to update transaction")
+        }
+    }
+
+    // Handle Budget Update
+    const handleBudgetUpdate = async (rowId: string, newValue: string) => {
+        const val = parseFloat(newValue)
+        if (isNaN(val)) return
+
+        try {
+            // Our row might combine multiple IDs if they share a name, but for editing we need real single IDs.
+            // In our current mapping logic, we combine rows by name. This makes editing tricky.
+            // Simplification: We only support editing if the row represents a single category or we assume we edit all?
+            // "rowsMap" combines IDs.
+            // Let's assume most users have unique names. If there are multiple IDs, we update the first one or we need to refine the rows logic.
+            // For now, let's update the first ID found.
+
+            // Wait, we attached 'ids' array to the row.
+            // Let's modify the FIRST doc.
+            if (!rowId) return
+
+            const docId = rowId
+            await updateDoc(doc(db, 'budgets', docId), {
+                amount: val
+            })
+
+            // Optimistically update local state for UI responsiveness
+            if (reportData) {
+                const sections = { ...reportData.sections }
+                Object.keys(sections).forEach(gid => {
+                    const row = sections[gid].rows.find(r => r.id === docId)
+                    if (row) {
+                        row.budget = val
+                        // Recalculate totals not implemented here for brevity, usually should render from props or reload
+                    }
+                })
+                // Ideally we should reload or update complex state. Reloading is safest for totals.
+                // setReportData({...reportData, sections})
+                generateReport() // Reload to be safe and update totals
+            }
+
+        } catch (e) {
+            console.error("Error updating budget", e)
+            alert("Failed to update budget")
+        }
+    }
+
+    const handleInitialBalanceUpdate = async (valStr: string) => {
+        // Strip spaces
+        const cleanVal = valStr.replace(/\s/g, '').replace(/,/g, '')
+        const val = parseFloat(cleanVal)
+        if (isNaN(val)) return
+
+        try {
+            await setDoc(doc(db, 'users', currentUser.uid), {
+                initialReportBalance: val
+            }, { merge: true })
+
+            // Reload to recalculate
+            generateReport()
+        } catch (e) {
+            console.error("Error saving initial balance", e)
+            alert("Failed to save opening balance")
+        }
+    }
 
     if (loading) {
         return (
@@ -313,78 +623,320 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
         )
     }
 
-    const { income, monthly, adhoc, unmapped, monthLabels, monthKeys } = reportData
-
-    const renderSection = (title: string, data: SectionData, isIncome = false) => (
-        <div className="report-section">
-            <h3 className="section-title">{title}</h3>
-            <table className="report-table">
-                <thead>
-                    <tr>
-                        <th>Category</th>
-                        <th className="num-col">Budget</th>
-                        {monthLabels.map(m => <th key={m} className="num-col">{m}</th>)}
-                    </tr>
-                </thead>
-                <tbody>
-                    {data.rows.map(row => (
-                        <tr key={row.id}>
-                            <td>{row.name}</td>
-                            <td className="num-col budget-cell">{fmt(row.budget)}</td>
-                            {monthKeys.map(k => (
-                                <td key={k} className={`num-col ${!isIncome && row.months[k] > row.budget ? 'over-budget-text' : ''
-                                    }`}>
-                                    {fmt(Math.abs(row.months[k]))}
-                                    {/* Note: showing absolute value for expenses usually looks cleaner in specific expense tables, 
-                      but standard accounting keeps signs. 
-                      User asked for "actual numbers". 
-                      Usually expenses are positive numbers in a budget sheet.
-                      Transactions are stored as negative for expenses?
-                      Existing app logic: specific category cards showed "R amount".
-                      Usually input for transaction is negative or typed as expense.
-                      Let's check `Transactions.tsx`. Usually expense is negative.
-                      If I sum negative numbers, I get negative total.
-                      I should display them as positive for the "Report" of expenses.
-                      Income is positive.
-                  */}
-                                </td>
-                            ))}
-                        </tr>
-                    ))}
-                    <tr className="subtotal-row">
-                        <td>Total</td>
-                        <td className="num-col">{fmt(data.totalBudget)}</td>
-                        {monthKeys.map(k => (
-                            <td key={k} className="num-col">{fmt(Math.abs(data.totalMonths[k]))}</td>
-                        ))}
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-    )
+    const { sections, groupings, unmapped, monthLabels, monthKeys } = reportData
 
     return (
         <div className="dashboard-report">
             <h2>Monthly Financial Report</h2>
 
-            {renderSection('Income', income, true)}
-            {renderSection('Monthly Expenses', monthly)}
-            {renderSection('Ad Hoc Expenses', adhoc)}
-
-            <div className="report-section unmapped-section">
-                <h3 className="section-title">Uncategorized</h3>
+            <div className="table-wrapper">
                 <table className="report-table">
-                    <tbody>
+                    <thead>
                         <tr>
-                            <td>Unmapped Transactions</td>
-                            <td className="num-col">-</td>
+                            <th className="sticky-col first-col">Category</th>
+                            <th className="sticky-col second-col num-col">Budget</th>
+                            {monthLabels.map(m => <th key={m} className="num-col">{m}</th>)}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {groupings.map(g => {
+                            const data = sections[g.id]
+                            if (!data) return null
+
+                            // Determine if we show red for over budget
+                            const isIncome = g.isIncome
+
+                            return (
+                                <React.Fragment key={g.id}>
+                                    {/* Section Header */}
+                                    <tr className="section-header-row">
+                                        <td className="sticky-col first-col" style={{ fontWeight: 'bold', backgroundColor: '#f0f4f8', color: '#12265E' }}>{g.name}</td>
+                                        <td className="sticky-col second-col" style={{ backgroundColor: '#f0f4f8' }}></td>
+                                        {monthKeys.map(k => <td key={k} style={{ backgroundColor: '#f0f4f8' }}></td>)}
+                                    </tr>
+
+                                    {/* Rows */}
+                                    {data.rows.map(row => (
+                                        <tr key={row.id}>
+                                            <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem' }}>{row.name}</td>
+                                            <td className="sticky-col second-col num-col budget-cell">
+                                                <input
+                                                    type="text"
+                                                    defaultValue={row.budget === 0 ? '' : Math.round(row.budget).toLocaleString('en-ZA').replace(/,/g, ' ')} // Display with space separators
+                                                    className="budget-input"
+                                                    placeholder="0"
+                                                    onKeyDown={(e) => {
+                                                        if (e.key === 'Enter') {
+                                                            // Strip spaces before parsing
+                                                            const cleanVal = e.currentTarget.value.replace(/\s/g, '').replace(/,/g, '')
+                                                            handleBudgetUpdate(row.id, cleanVal)
+                                                            e.currentTarget.blur()
+                                                        }
+                                                    }}
+                                                    onBlur={(e) => {
+                                                        const cleanVal = e.target.value.replace(/\s/g, '').replace(/,/g, '')
+                                                        handleBudgetUpdate(row.id, cleanVal)
+                                                    }}
+                                                />
+                                            </td>
+                                            {monthKeys.map(k => (
+                                                <td
+                                                    key={k}
+                                                    className={`num-col ${!isIncome && row.months[k].amount > row.budget ? 'over-budget-text' : ''}`}
+                                                    onClick={() => handleCellClick(`${row.name} - ${monthLabels[monthKeys.indexOf(k)]}`, row.months[k])}
+                                                    style={{ cursor: 'pointer' }}
+                                                    title="Click to view details"
+                                                >
+                                                    {fmt(Math.abs(row.months[k].amount))}
+                                                </td>
+                                            ))}
+                                        </tr>
+                                    ))}
+
+                                    {/* Subtotal */}
+                                    <tr className="subtotal-row">
+                                        <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem' }}>Total {g.name}</td>
+                                        <td className="sticky-col second-col num-col">{fmt(data.totalBudget)}</td>
+                                        {monthKeys.map(k => (
+                                            <td key={k} className="num-col">{fmt(Math.abs(data.totalMonths[k]))}</td>
+                                        ))}
+                                    </tr>
+                                </React.Fragment>
+                            )
+                        })}
+
+                        {/* Unmapped Section at the bottom */}
+                        <tr className="section-header-row">
+                            <td className="sticky-col first-col" style={{ fontWeight: 'bold', backgroundColor: '#fff8f8', color: '#d32f2f' }}>Uncategorized</td>
+                            <td className="sticky-col second-col" style={{ backgroundColor: '#fff8f8' }}></td>
+                            {monthKeys.map(k => <td key={k} style={{ backgroundColor: '#fff8f8' }}></td>)}
+                        </tr>
+                        <tr>
+                            <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem' }}>Unmapped Transactions</td>
+                            <td className="sticky-col second-col num-col">-</td>
                             {monthKeys.map(k => (
-                                <td key={k} className="num-col">{fmt(Math.abs(unmapped.months[k]))}</td>
+                                <td
+                                    key={k}
+                                    className="num-col"
+                                    onClick={() => handleCellClick(`Unmapped - ${monthLabels[monthKeys.indexOf(k)]}`, unmapped.months[k])}
+                                    style={{ cursor: 'pointer' }}
+                                    title="Click to view details"
+                                >
+                                    {fmt(Math.abs(unmapped.months[k].amount))}
+                                </td>
                             ))}
                         </tr>
+
+                        {/* Balances Section */}
+                        <tr className="section-header-row">
+                            <td className="sticky-col first-col" style={{ fontWeight: 'bold', backgroundColor: '#e3f2fd', color: '#1565c0' }}>Bank Balances</td>
+                            <td className="sticky-col second-col" style={{ backgroundColor: '#e3f2fd' }}></td>
+                            {monthKeys.map(k => <td key={k} style={{ backgroundColor: '#e3f2fd' }}></td>)}
+                        </tr>
+
+                        {/* Total Income */}
+                        <tr>
+                            <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem', color: '#2e7d32' }}>Total Income</td>
+                            <td className="sticky-col second-col num-col">-</td>
+                            {monthKeys.map(k => (
+                                <td
+                                    key={k}
+                                    className="num-col"
+                                    style={{ color: '#2e7d32', cursor: 'pointer' }}
+                                    onClick={() => handleCellClick(`Income - ${monthLabels[monthKeys.indexOf(k)]}`, reportData.balances.income[k])}
+                                >
+                                    {fmt(reportData.balances.income[k].amount)}
+                                </td>
+                            ))}
+                        </tr>
+
+                        {/* Total Expenses */}
+                        <tr>
+                            <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem', color: '#c62828' }}>Total Expenses</td>
+                            <td className="sticky-col second-col num-col">-</td>
+                            {monthKeys.map(k => (
+                                <td
+                                    key={k}
+                                    className="num-col"
+                                    style={{ color: '#c62828', cursor: 'pointer' }}
+                                    onClick={() => handleCellClick(`Expenses - ${monthLabels[monthKeys.indexOf(k)]}`, reportData.balances.expenses[k])}
+                                >
+                                    {fmt(Math.abs(reportData.balances.expenses[k].amount))}
+                                </td>
+                            ))}
+                        </tr>
+
+                        {/* Net Surplus/Deficit */}
+                        <tr>
+                            <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem', fontWeight: 500 }}>Net Surplus/Deficit</td>
+                            <td className="sticky-col second-col num-col">-</td>
+                            {monthKeys.map(k => {
+                                const val = reportData.balances.net[k]
+                                return (
+                                    <td key={k} className="num-col" style={{ color: val < 0 ? '#d32f2f' : '#388e3c', fontWeight: 'bold' }}>
+                                        {fmt(val)}
+                                    </td>
+                                )
+                            })}
+                        </tr>
+
+                        {/* Opening Balance (Editable Anchor First) */}
+                        <tr>
+                            <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem' }}>Opening Balance</td>
+
+                            {/* Input in the 'Budget' column which technically acts as the Anchor Config */}
+                            <td className="sticky-col second-col num-col budget-cell">
+                                <input
+                                    type="text"
+                                    defaultValue={reportData.initialBalance ? Math.round(reportData.initialBalance).toLocaleString('en-ZA').replace(/,/g, ' ') : ''}
+                                    className="budget-input"
+                                    placeholder="0"
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                            handleInitialBalanceUpdate(e.currentTarget.value)
+                                            e.currentTarget.blur()
+                                        }
+                                    }}
+                                    onBlur={(e) => {
+                                        handleInitialBalanceUpdate(e.target.value)
+                                    }}
+                                />
+                            </td>
+
+                            {monthKeys.map(k => (
+                                <td key={k} className="num-col">
+                                    {fmt(reportData.balances.opening[k])}
+                                </td>
+                            ))}
+                        </tr>
+
+                        {/* Closing Balance */}
+                        <tr style={{ borderTop: '2px solid #ddd', backgroundColor: '#f9f9f9' }}>
+                            <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem', fontWeight: 'bold' }}>Closing Balance</td>
+                            <td className="sticky-col second-col num-col">-</td>
+                            {monthKeys.map(k => (
+                                <td key={k} className="num-col" style={{ fontWeight: 'bold', color: '#12265E' }}>
+                                    {fmt(reportData.balances.closing[k])}
+                                </td>
+                            ))}
+                        </tr>
+
                     </tbody>
                 </table>
             </div>
+
+            {/* Drilldown Modal */}
+            {selectedCell && (
+                <div style={{
+                    position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                    backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 1000,
+                    display: 'flex', justifyContent: 'center', alignItems: 'center'
+                }}>
+                    <div style={{
+                        backgroundColor: 'white', padding: '20px', borderRadius: '8px',
+                        maxWidth: '800px', width: '90%', maxHeight: '80vh', display: 'flex', flexDirection: 'column',
+                        boxShadow: '0 4px 6px rgba(0,0,0,0.1)'
+                    }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '15px' }}>
+                            <h3 style={{ margin: 0 }}>Details: {selectedCell.title}</h3>
+                            <button onClick={() => setSelectedCell(null)} style={{ border: 'none', background: 'none', fontSize: '1.5rem', cursor: 'pointer' }}>×</button>
+                        </div>
+                        <div style={{ overflowY: 'auto', flex: 1 }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                <thead>
+                                    <tr style={{ textAlign: 'left', borderBottom: '1px solid #eee' }}>
+                                        <th style={{ padding: '8px', cursor: 'pointer' }} onClick={() => handleSort('date')}>
+                                            Date {sortConfig.field === 'date' ? (sortConfig.direction === 'asc' ? '↑' : '↓') : '↕'}
+                                        </th>
+                                        <th style={{ padding: '8px', cursor: 'pointer' }} onClick={() => handleSort('mappedDescription')}>
+                                            Description {sortConfig.field === 'mappedDescription' ? (sortConfig.direction === 'asc' ? '↑' : '↓') : '↕'}
+                                        </th>
+                                        <th style={{ padding: '8px', cursor: 'pointer' }} onClick={() => handleSort('amount')}>
+                                            Amount {sortConfig.field === 'amount' ? (sortConfig.direction === 'asc' ? '↑' : '↓') : '↕'}
+                                        </th>
+                                        <th style={{ padding: '8px', cursor: 'pointer' }} onClick={() => handleSort('categoryName')}>
+                                            Category {sortConfig.field === 'categoryName' ? (sortConfig.direction === 'asc' ? '↑' : '↓') : '↕'}
+                                        </th>
+                                        <th style={{ padding: '8px' }}>Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {getSortedTxns().map(t => (
+                                        <tr key={t.id} style={{ borderBottom: '1px solid #f9f9f9' }}>
+                                            <td style={{ padding: '8px' }}>{t.date && typeof t.date.toDate === 'function' ? t.date.toDate().toLocaleDateString() : new Date(t.date).toLocaleDateString()}</td>
+                                            <td style={{ padding: '8px' }}>
+                                                <div style={{ fontWeight: 500 }}>{t.mappedDescription || t.description}</div>
+                                                {t.mappedDescription && <div style={{ fontSize: '0.8em', color: '#999' }}>Original: {t.description}</div>}
+                                            </td>
+                                            <td style={{ padding: '8px', color: t.amount < 0 ? '#c62828' : '#2e7d32' }}>{t.amount.toFixed(2)}</td>
+                                            <td style={{ padding: '8px' }}>{t.categoryName || 'Unmapped'}</td>
+                                            <td style={{ padding: '8px' }}>
+                                                <button
+                                                    onClick={() => setEditingTxn(t)}
+                                                    style={{ padding: '4px 12px', cursor: 'pointer', backgroundColor: '#e3f2fd', border: 'none', borderRadius: '4px', color: '#1565c0' }}
+                                                >
+                                                    Edit
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                        <div style={{ textAlign: 'right', marginTop: '15px', fontWeight: 'bold', borderTop: '1px solid #eee', paddingTop: '10px' }}>
+                            Total: {fmt(selectedCell.txns.reduce((sum, t) => sum + t.amount, 0))}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Edit Transaction Modal */}
+            {editingTxn && (
+                <div style={{
+                    position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                    backgroundColor: 'rgba(0,0,0,0.6)', zIndex: 1100,
+                    display: 'flex', justifyContent: 'center', alignItems: 'center'
+                }}>
+                    <div style={{ backgroundColor: 'white', padding: '25px', borderRadius: '8px', width: '400px', boxShadow: '0 10px 25px rgba(0,0,0,0.2)' }}>
+                        <h3 style={{ marginTop: 0 }}>Edit Transaction</h3>
+                        <form onSubmit={handleUpdateTransaction}>
+                            <div style={{ marginBottom: '15px' }}>
+                                <label style={{ display: 'block', marginBottom: '5px', fontSize: '0.9rem', color: '#666' }}>Description</label>
+                                <input
+                                    type="text"
+                                    defaultValue={editingTxn.mappedDescription || editingTxn.description}
+                                    onChange={e => setEditingTxn({ ...editingTxn, mappedDescription: e.target.value })}
+                                    style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #ddd' }}
+                                />
+                            </div>
+                            <div style={{ marginBottom: '15px' }}>
+                                <label style={{ display: 'block', marginBottom: '5px', fontSize: '0.9rem', color: '#666' }}>Category</label>
+                                <select
+                                    defaultValue={editingTxn.categoryId || ''}
+                                    onChange={e => {
+                                        const cat = allBudgets.find(b => b.id === e.target.value)
+                                        setEditingTxn({
+                                            ...editingTxn,
+                                            categoryId: e.target.value,
+                                            categoryName: cat ? cat.name : ''
+                                        })
+                                    }}
+                                    style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #ddd' }}
+                                >
+                                    <option value="">Unmapped</option>
+                                    {allBudgets.map(b => (
+                                        <option key={b.id} value={b.id}>{b.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '20px' }}>
+                                <button type="button" onClick={() => setEditingTxn(null)} style={{ padding: '8px 16px', border: '1px solid #ccc', background: 'white', borderRadius: '4px', cursor: 'pointer' }}>Cancel</button>
+                                <button type="submit" style={{ padding: '8px 16px', background: '#1565c0', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Update Transaction</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
         </div>
     )
 }

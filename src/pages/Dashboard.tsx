@@ -130,7 +130,7 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="container">
+    <div className="dashboard-container">
       <div className="dashboard-header">
         <div>
           <h1>Dashboard</h1>
