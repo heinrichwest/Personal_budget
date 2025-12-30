@@ -8,6 +8,10 @@ interface CollectionData {
   [key: string]: any
 }
 
+interface UserMap {
+  [userId: string]: string // userId -> email/displayName
+}
+
 const COLLECTIONS = [
   'users',
   'userRoles',
@@ -22,14 +26,61 @@ export default function Tables() {
   const { isSystemAdmin } = useAuth()
   const [selectedCollection, setSelectedCollection] = useState<string | null>(null)
   const [data, setData] = useState<CollectionData[]>([])
+  const [filteredData, setFilteredData] = useState<CollectionData[]>([])
   const [loading, setLoading] = useState(false)
   const [columns, setColumns] = useState<string[]>([])
+  const [userMap, setUserMap] = useState<UserMap>({})
+  const [filterText, setFilterText] = useState('')
+  const [filterColumn, setFilterColumn] = useState<string>('all')
+
+  // Load users map on mount for username lookups
+  useEffect(() => {
+    loadUserMap()
+  }, [])
 
   useEffect(() => {
     if (selectedCollection) {
       loadCollectionData(selectedCollection)
     }
   }, [selectedCollection])
+
+  // Apply filter when data or filter changes
+  useEffect(() => {
+    if (!filterText.trim()) {
+      setFilteredData(data)
+      return
+    }
+
+    const searchText = filterText.toLowerCase()
+    const filtered = data.filter(row => {
+      if (filterColumn === 'all') {
+        // Search all columns
+        return columns.some(col => {
+          const value = formatValue(row[col], col)
+          return value.toLowerCase().includes(searchText)
+        })
+      } else {
+        // Search specific column
+        const value = formatValue(row[filterColumn], filterColumn)
+        return value.toLowerCase().includes(searchText)
+      }
+    })
+    setFilteredData(filtered)
+  }, [data, filterText, filterColumn, columns])
+
+  async function loadUserMap() {
+    try {
+      const snapshot = await getDocs(collection(db, 'users'))
+      const map: UserMap = {}
+      snapshot.forEach(doc => {
+        const userData = doc.data()
+        map[doc.id] = userData.email || userData.displayName || doc.id
+      })
+      setUserMap(map)
+    } catch (error) {
+      console.error('Error loading users:', error)
+    }
+  }
 
   async function loadCollectionData(collectionName: string) {
     setLoading(true)
@@ -55,6 +106,9 @@ export default function Tables() {
 
       setColumns(sortedColumns)
       setData(docs)
+      setFilteredData(docs)
+      setFilterText('')
+      setFilterColumn('all')
     } catch (error) {
       console.error('Error loading collection:', error)
       setData([])
@@ -64,7 +118,7 @@ export default function Tables() {
     }
   }
 
-  function formatValue(value: any): string {
+  function formatValue(value: any, columnName?: string): string {
     if (value === null || value === undefined) {
       return '—'
     }
@@ -81,7 +135,20 @@ export default function Tables() {
     if (typeof value === 'object') {
       return JSON.stringify(value)
     }
-    return String(value)
+
+    // Convert userId to username if applicable
+    const strValue = String(value)
+    if (columnName && (columnName === 'userId' || columnName === 'createdBy' || columnName === 'updatedBy')) {
+      if (strValue === 'SYSTEM') {
+        return 'SYSTEM'
+      }
+      const username = userMap[strValue]
+      if (username) {
+        return username
+      }
+    }
+
+    return strValue
   }
 
   if (!isSystemAdmin) {
@@ -140,7 +207,9 @@ export default function Tables() {
             borderBottom: '1px solid #eee',
             display: 'flex',
             justifyContent: 'space-between',
-            alignItems: 'center'
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: '1rem'
           }}>
             <h2 style={{ margin: 0, color: '#12265e' }}>
               {selectedCollection}
@@ -150,22 +219,68 @@ export default function Tables() {
                 color: '#666',
                 fontWeight: 'normal'
               }}>
-                ({data.length} documents)
+                ({filteredData.length}{filterText ? ` of ${data.length}` : ''} documents)
               </span>
             </h2>
-            <button
-              onClick={() => loadCollectionData(selectedCollection)}
-              style={{
-                padding: '0.5rem 1rem',
-                borderRadius: '4px',
-                border: '1px solid #12265e',
-                backgroundColor: 'white',
-                color: '#12265e',
-                cursor: 'pointer'
-              }}
-            >
-              Refresh
-            </button>
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+              <select
+                value={filterColumn}
+                onChange={(e) => setFilterColumn(e.target.value)}
+                style={{
+                  padding: '0.5rem',
+                  borderRadius: '4px',
+                  border: '1px solid #ccc',
+                  backgroundColor: 'white',
+                  color: '#333',
+                  cursor: 'pointer'
+                }}
+              >
+                <option value="all">All Columns</option>
+                {columns.map(col => (
+                  <option key={col} value={col}>{col}</option>
+                ))}
+              </select>
+              <input
+                type="text"
+                placeholder="Filter..."
+                value={filterText}
+                onChange={(e) => setFilterText(e.target.value)}
+                style={{
+                  padding: '0.5rem 1rem',
+                  borderRadius: '4px',
+                  border: '1px solid #ccc',
+                  width: '200px'
+                }}
+              />
+              {filterText && (
+                <button
+                  onClick={() => setFilterText('')}
+                  style={{
+                    padding: '0.5rem 0.75rem',
+                    borderRadius: '4px',
+                    border: '1px solid #ccc',
+                    backgroundColor: 'white',
+                    color: '#666',
+                    cursor: 'pointer'
+                  }}
+                >
+                  Clear
+                </button>
+              )}
+              <button
+                onClick={() => loadCollectionData(selectedCollection)}
+                style={{
+                  padding: '0.5rem 1rem',
+                  borderRadius: '4px',
+                  border: '1px solid #12265e',
+                  backgroundColor: 'white',
+                  color: '#12265e',
+                  cursor: 'pointer'
+                }}
+              >
+                Refresh
+              </button>
+            </div>
           </div>
 
           {loading ? (
@@ -173,6 +288,10 @@ export default function Tables() {
           ) : data.length === 0 ? (
             <div style={{ padding: '2rem', textAlign: 'center', color: '#666' }}>
               No documents found in this collection.
+            </div>
+          ) : filteredData.length === 0 ? (
+            <div style={{ padding: '2rem', textAlign: 'center', color: '#666' }}>
+              No documents match the filter.
             </div>
           ) : (
             <div style={{ overflowX: 'auto' }}>
@@ -201,7 +320,7 @@ export default function Tables() {
                   </tr>
                 </thead>
                 <tbody>
-                  {data.map((row, idx) => (
+                  {filteredData.map((row, idx) => (
                     <tr
                       key={row.id}
                       style={{
@@ -219,9 +338,9 @@ export default function Tables() {
                             textOverflow: 'ellipsis',
                             whiteSpace: 'nowrap'
                           }}
-                          title={formatValue(row[col])}
+                          title={formatValue(row[col], col)}
                         >
-                          {formatValue(row[col])}
+                          {formatValue(row[col], col)}
                         </td>
                       ))}
                     </tr>
