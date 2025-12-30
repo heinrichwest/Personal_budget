@@ -923,14 +923,18 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
 
                                     {/* Subtotal */}
                                     {(() => {
-                                        const sectionMonthValues = monthKeys.map(k => Math.abs(data.totalMonths[k] || 0))
-                                        const sectionNonZero = sectionMonthValues.filter(v => v > 0)
-                                        const sectionAvg = sectionNonZero.length > 0 ? sectionNonZero.reduce((a, b) => a + b, 0) / sectionNonZero.length : 0
+                                        // Sum up the averages from each row
+                                        const sectionAvgTotal = data.rows.reduce((sum, row) => {
+                                            const monthValues = monthKeys.map(k => Math.abs(row.months[k]?.amount || 0))
+                                            const nonZeroValues = monthValues.filter(v => v > 0)
+                                            const rowAvg = nonZeroValues.length > 0 ? nonZeroValues.reduce((a, b) => a + b, 0) / nonZeroValues.length : 0
+                                            return sum + rowAvg
+                                        }, 0)
                                         return (
                                             <tr className="subtotal-row">
                                                 <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem' }}>Total {g.name}</td>
                                                 <td className="sticky-col second-col num-col">{fmt(data.totalBudget)}</td>
-                                                <td className="sticky-col third-col num-col" style={{ color: '#666', fontSize: '0.9em' }}>{fmt(sectionAvg)}</td>
+                                                <td className="sticky-col third-col num-col" style={{ color: '#666', fontSize: '0.9em' }}>{fmt(sectionAvgTotal)}</td>
                                                 {monthKeys.map(k => (
                                                     <td key={k} className="num-col">{fmt(Math.abs(data.totalMonths[k]))}</td>
                                                 ))}
@@ -982,14 +986,25 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
 
                         {/* Total Income */}
                         {(() => {
-                            const incomeValues = monthKeys.map(k => reportData.balances.income[k]?.amount || 0)
-                            const incomeNonZero = incomeValues.filter(v => v > 0)
-                            const incomeAvg = incomeNonZero.length > 0 ? incomeNonZero.reduce((a, b) => a + b, 0) / incomeNonZero.length : 0
+                            // Sum up averages from all income section rows
+                            let incomeAvgTotal = 0
+                            groupings.filter(g => g.isIncome).forEach(g => {
+                                const sectionData = sections[g.id]
+                                if (sectionData) {
+                                    sectionData.rows.forEach(row => {
+                                        const monthValues = monthKeys.map(k => Math.abs(row.months[k]?.amount || 0))
+                                        const nonZeroValues = monthValues.filter(v => v > 0)
+                                        if (nonZeroValues.length > 0) {
+                                            incomeAvgTotal += nonZeroValues.reduce((a, b) => a + b, 0) / nonZeroValues.length
+                                        }
+                                    })
+                                }
+                            })
                             return (
                                 <tr>
                                     <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem', color: '#2e7d32' }}>Total Income</td>
                                     <td className="sticky-col second-col num-col">{fmt(reportData.budgetTotals.income)}</td>
-                                    <td className="sticky-col third-col num-col" style={{ color: '#666', fontSize: '0.9em' }}>{fmt(incomeAvg)}</td>
+                                    <td className="sticky-col third-col num-col" style={{ color: '#666', fontSize: '0.9em' }}>{fmt(incomeAvgTotal)}</td>
                                     {monthKeys.map(k => (
                                         <td
                                             key={k}
@@ -1006,14 +1021,25 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
 
                         {/* Total Expenses */}
                         {(() => {
-                            const expenseValues = monthKeys.map(k => Math.abs(reportData.balances.expenses[k]?.amount || 0))
-                            const expenseNonZero = expenseValues.filter(v => v > 0)
-                            const expenseAvg = expenseNonZero.length > 0 ? expenseNonZero.reduce((a, b) => a + b, 0) / expenseNonZero.length : 0
+                            // Sum up averages from all expense section rows
+                            let expenseAvgTotal = 0
+                            groupings.filter(g => !g.isIncome).forEach(g => {
+                                const sectionData = sections[g.id]
+                                if (sectionData) {
+                                    sectionData.rows.forEach(row => {
+                                        const monthValues = monthKeys.map(k => Math.abs(row.months[k]?.amount || 0))
+                                        const nonZeroValues = monthValues.filter(v => v > 0)
+                                        if (nonZeroValues.length > 0) {
+                                            expenseAvgTotal += nonZeroValues.reduce((a, b) => a + b, 0) / nonZeroValues.length
+                                        }
+                                    })
+                                }
+                            })
                             return (
                                 <tr>
                                     <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem', color: '#c62828' }}>Total Expenses</td>
                                     <td className="sticky-col second-col num-col">{fmt(reportData.budgetTotals.expenses)}</td>
-                                    <td className="sticky-col third-col num-col" style={{ color: '#666', fontSize: '0.9em' }}>{fmt(expenseAvg)}</td>
+                                    <td className="sticky-col third-col num-col" style={{ color: '#666', fontSize: '0.9em' }}>{fmt(expenseAvgTotal)}</td>
                                     {monthKeys.map(k => (
                                         <td
                                             key={k}
@@ -1030,9 +1056,28 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
 
                         {/* Net Surplus/Deficit */}
                         {(() => {
-                            const netValues = monthKeys.map(k => reportData.balances.net[k] || 0)
-                            const netNonZero = netValues.filter(v => v !== 0)
-                            const netAvg = netNonZero.length > 0 ? netNonZero.reduce((a, b) => a + b, 0) / netNonZero.length : 0
+                            // Calculate net average as income average - expense average
+                            let incomeAvgTotal = 0
+                            let expenseAvgTotal = 0
+
+                            groupings.forEach(g => {
+                                const sectionData = sections[g.id]
+                                if (sectionData) {
+                                    sectionData.rows.forEach(row => {
+                                        const monthValues = monthKeys.map(k => Math.abs(row.months[k]?.amount || 0))
+                                        const nonZeroValues = monthValues.filter(v => v > 0)
+                                        if (nonZeroValues.length > 0) {
+                                            const rowAvg = nonZeroValues.reduce((a, b) => a + b, 0) / nonZeroValues.length
+                                            if (g.isIncome) {
+                                                incomeAvgTotal += rowAvg
+                                            } else {
+                                                expenseAvgTotal += rowAvg
+                                            }
+                                        }
+                                    })
+                                }
+                            })
+                            const netAvg = incomeAvgTotal - expenseAvgTotal
                             return (
                                 <tr>
                                     <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem', fontWeight: 500 }}>Net Surplus/Deficit</td>
