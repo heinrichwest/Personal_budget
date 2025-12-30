@@ -77,14 +77,19 @@
 .report-table .sticky-col.second-col {
     position: sticky;
     left: 200px;
-    /* Assuming first col is around 200px, but width varies. */
-    /* Actually with fixed table layout simpler, but auto layout is better here. */
-    /* To make 2nd col sticky reliably without fixed widths is hard in pure CSS unless we fix 1st col width. */
-    /* Let's fix first col width */
-    left: 200px;
     background-color: #fcfcfc;
     z-index: 10;
     width: 100px;
+    border-right: 1px solid #eee;
+}
+
+/* Sticky Third Column (Average) */
+.report-table .sticky-col.third-col {
+    position: sticky;
+    left: 300px; /* 200px (first col) + 100px (second col) */
+    background-color: #f8f9fa;
+    z-index: 10;
+    width: 80px;
     border-right: 2px solid #ddd;
 }
 
@@ -107,6 +112,12 @@
 .report-table th.second-col,
 .report-table td.second-col {
     width: 100px;
+    text-align: right;
+}
+
+.report-table th.third-col,
+.report-table td.third-col {
+    width: 80px;
     text-align: right;
 }
 
@@ -153,6 +164,10 @@
 
 .subtotal-row td.sticky-col {
     background-color: #f8f9fa;
+}
+
+.subtotal-row td.sticky-col.third-col {
+    background-color: #f0f2f5;
 }
 
 .over-budget-text {

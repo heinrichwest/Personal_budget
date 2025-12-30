@@ -851,6 +851,7 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                         <tr>
                             <th className="sticky-col first-col">Category</th>
                             <th className="sticky-col second-col num-col">Budget</th>
+                            <th className="sticky-col third-col num-col">Avg</th>
                             {monthLabels.map(m => <th key={m} className="num-col">{m}</th>)}
                         </tr>
                     </thead>
@@ -868,55 +869,74 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                                     <tr className="section-header-row">
                                         <td className="sticky-col first-col" style={{ fontWeight: 'bold', backgroundColor: '#f0f4f8', color: '#12265E' }}>{g.name}</td>
                                         <td className="sticky-col second-col" style={{ backgroundColor: '#f0f4f8' }}></td>
+                                        <td className="sticky-col third-col" style={{ backgroundColor: '#f0f4f8' }}></td>
                                         {monthKeys.map(k => <td key={k} style={{ backgroundColor: '#f0f4f8' }}></td>)}
                                     </tr>
 
                                     {/* Rows */}
-                                    {data.rows.map(row => (
-                                        <tr key={row.id}>
-                                            <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem' }}>{row.name}</td>
-                                            <td className="sticky-col second-col num-col budget-cell">
-                                                <input
-                                                    type="text"
-                                                    defaultValue={row.budget === 0 ? '' : Math.round(row.budget).toLocaleString('en-ZA').replace(/,/g, ' ')} // Display with space separators
-                                                    className="budget-input"
-                                                    placeholder="0"
-                                                    onKeyDown={(e) => {
-                                                        if (e.key === 'Enter') {
-                                                            // Strip spaces before parsing
-                                                            const cleanVal = e.currentTarget.value.replace(/\s/g, '').replace(/,/g, '')
+                                    {data.rows.map(row => {
+                                        // Calculate average across all months
+                                        const monthValues = monthKeys.map(k => Math.abs(row.months[k]?.amount || 0))
+                                        const nonZeroValues = monthValues.filter(v => v > 0)
+                                        const avg = nonZeroValues.length > 0 ? nonZeroValues.reduce((a, b) => a + b, 0) / nonZeroValues.length : 0
+
+                                        return (
+                                            <tr key={row.id}>
+                                                <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem' }}>{row.name}</td>
+                                                <td className="sticky-col second-col num-col budget-cell">
+                                                    <input
+                                                        type="text"
+                                                        defaultValue={row.budget === 0 ? '' : Math.round(row.budget).toLocaleString('en-ZA').replace(/,/g, ' ')} // Display with space separators
+                                                        className="budget-input"
+                                                        placeholder="0"
+                                                        onKeyDown={(e) => {
+                                                            if (e.key === 'Enter') {
+                                                                // Strip spaces before parsing
+                                                                const cleanVal = e.currentTarget.value.replace(/\s/g, '').replace(/,/g, '')
+                                                                handleBudgetUpdate(row.id, cleanVal)
+                                                                e.currentTarget.blur()
+                                                            }
+                                                        }}
+                                                        onBlur={(e) => {
+                                                            const cleanVal = e.target.value.replace(/\s/g, '').replace(/,/g, '')
                                                             handleBudgetUpdate(row.id, cleanVal)
-                                                            e.currentTarget.blur()
-                                                        }
-                                                    }}
-                                                    onBlur={(e) => {
-                                                        const cleanVal = e.target.value.replace(/\s/g, '').replace(/,/g, '')
-                                                        handleBudgetUpdate(row.id, cleanVal)
-                                                    }}
-                                                />
-                                            </td>
-                                            {monthKeys.map(k => (
-                                                <td
-                                                    key={k}
-                                                    className={`num-col ${!isIncome && row.months[k].amount > row.budget ? 'over-budget-text' : ''}`}
-                                                    onClick={() => handleCellClick(`${row.name} - ${monthLabels[monthKeys.indexOf(k)]}`, row.months[k])}
-                                                    style={{ cursor: 'pointer' }}
-                                                    title="Click to view details"
-                                                >
-                                                    {fmt(Math.abs(row.months[k].amount))}
+                                                        }}
+                                                    />
                                                 </td>
-                                            ))}
-                                        </tr>
-                                    ))}
+                                                <td className="sticky-col third-col num-col" style={{ color: '#666', fontSize: '0.9em' }}>
+                                                    {fmt(avg)}
+                                                </td>
+                                                {monthKeys.map(k => (
+                                                    <td
+                                                        key={k}
+                                                        className={`num-col ${!isIncome && row.months[k].amount > row.budget ? 'over-budget-text' : ''}`}
+                                                        onClick={() => handleCellClick(`${row.name} - ${monthLabels[monthKeys.indexOf(k)]}`, row.months[k])}
+                                                        style={{ cursor: 'pointer' }}
+                                                        title="Click to view details"
+                                                    >
+                                                        {fmt(Math.abs(row.months[k].amount))}
+                                                    </td>
+                                                ))}
+                                            </tr>
+                                        )
+                                    })}
 
                                     {/* Subtotal */}
-                                    <tr className="subtotal-row">
-                                        <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem' }}>Total {g.name}</td>
-                                        <td className="sticky-col second-col num-col">{fmt(data.totalBudget)}</td>
-                                        {monthKeys.map(k => (
-                                            <td key={k} className="num-col">{fmt(Math.abs(data.totalMonths[k]))}</td>
-                                        ))}
-                                    </tr>
+                                    {(() => {
+                                        const sectionMonthValues = monthKeys.map(k => Math.abs(data.totalMonths[k] || 0))
+                                        const sectionNonZero = sectionMonthValues.filter(v => v > 0)
+                                        const sectionAvg = sectionNonZero.length > 0 ? sectionNonZero.reduce((a, b) => a + b, 0) / sectionNonZero.length : 0
+                                        return (
+                                            <tr className="subtotal-row">
+                                                <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem' }}>Total {g.name}</td>
+                                                <td className="sticky-col second-col num-col">{fmt(data.totalBudget)}</td>
+                                                <td className="sticky-col third-col num-col" style={{ color: '#666', fontSize: '0.9em' }}>{fmt(sectionAvg)}</td>
+                                                {monthKeys.map(k => (
+                                                    <td key={k} className="num-col">{fmt(Math.abs(data.totalMonths[k]))}</td>
+                                                ))}
+                                            </tr>
+                                        )
+                                    })()}
                                 </React.Fragment>
                             )
                         })}
@@ -925,78 +945,114 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                         <tr className="section-header-row">
                             <td className="sticky-col first-col" style={{ fontWeight: 'bold', backgroundColor: '#fff8f8', color: '#d32f2f' }}>Uncategorized</td>
                             <td className="sticky-col second-col" style={{ backgroundColor: '#fff8f8' }}></td>
+                            <td className="sticky-col third-col" style={{ backgroundColor: '#fff8f8' }}></td>
                             {monthKeys.map(k => <td key={k} style={{ backgroundColor: '#fff8f8' }}></td>)}
                         </tr>
-                        <tr>
-                            <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem' }}>Unmapped Transactions</td>
-                            <td className="sticky-col second-col num-col">-</td>
-                            {monthKeys.map(k => (
-                                <td
-                                    key={k}
-                                    className="num-col"
-                                    onClick={() => handleCellClick(`Unmapped - ${monthLabels[monthKeys.indexOf(k)]}`, unmapped.months[k])}
-                                    style={{ cursor: 'pointer' }}
-                                    title="Click to view details"
-                                >
-                                    {fmt(Math.abs(unmapped.months[k].amount))}
-                                </td>
-                            ))}
-                        </tr>
+                        {(() => {
+                            const unmappedValues = monthKeys.map(k => Math.abs(unmapped.months[k]?.amount || 0))
+                            const unmappedNonZero = unmappedValues.filter(v => v > 0)
+                            const unmappedAvg = unmappedNonZero.length > 0 ? unmappedNonZero.reduce((a, b) => a + b, 0) / unmappedNonZero.length : 0
+                            return (
+                                <tr>
+                                    <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem' }}>Unmapped Transactions</td>
+                                    <td className="sticky-col second-col num-col">-</td>
+                                    <td className="sticky-col third-col num-col" style={{ color: '#666', fontSize: '0.9em' }}>{fmt(unmappedAvg)}</td>
+                                    {monthKeys.map(k => (
+                                        <td
+                                            key={k}
+                                            className="num-col"
+                                            onClick={() => handleCellClick(`Unmapped - ${monthLabels[monthKeys.indexOf(k)]}`, unmapped.months[k])}
+                                            style={{ cursor: 'pointer' }}
+                                            title="Click to view details"
+                                        >
+                                            {fmt(Math.abs(unmapped.months[k].amount))}
+                                        </td>
+                                    ))}
+                                </tr>
+                            )
+                        })()}
 
                         {/* Balances Section */}
                         <tr className="section-header-row">
                             <td className="sticky-col first-col" style={{ fontWeight: 'bold', backgroundColor: '#e3f2fd', color: '#1565c0' }}>Bank Balances</td>
                             <td className="sticky-col second-col" style={{ backgroundColor: '#e3f2fd' }}></td>
+                            <td className="sticky-col third-col" style={{ backgroundColor: '#e3f2fd' }}></td>
                             {monthKeys.map(k => <td key={k} style={{ backgroundColor: '#e3f2fd' }}></td>)}
                         </tr>
 
                         {/* Total Income */}
-                        <tr>
-                            <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem', color: '#2e7d32' }}>Total Income</td>
-                            <td className="sticky-col second-col num-col">{fmt(reportData.budgetTotals.income)}</td>
-                            {monthKeys.map(k => (
-                                <td
-                                    key={k}
-                                    className="num-col"
-                                    style={{ color: '#2e7d32', cursor: 'pointer' }}
-                                    onClick={() => handleCellClick(`Income - ${monthLabels[monthKeys.indexOf(k)]}`, reportData.balances.income[k])}
-                                >
-                                    {fmt(reportData.balances.income[k].amount)}
-                                </td>
-                            ))}
-                        </tr>
+                        {(() => {
+                            const incomeValues = monthKeys.map(k => reportData.balances.income[k]?.amount || 0)
+                            const incomeNonZero = incomeValues.filter(v => v > 0)
+                            const incomeAvg = incomeNonZero.length > 0 ? incomeNonZero.reduce((a, b) => a + b, 0) / incomeNonZero.length : 0
+                            return (
+                                <tr>
+                                    <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem', color: '#2e7d32' }}>Total Income</td>
+                                    <td className="sticky-col second-col num-col">{fmt(reportData.budgetTotals.income)}</td>
+                                    <td className="sticky-col third-col num-col" style={{ color: '#666', fontSize: '0.9em' }}>{fmt(incomeAvg)}</td>
+                                    {monthKeys.map(k => (
+                                        <td
+                                            key={k}
+                                            className="num-col"
+                                            style={{ color: '#2e7d32', cursor: 'pointer' }}
+                                            onClick={() => handleCellClick(`Income - ${monthLabels[monthKeys.indexOf(k)]}`, reportData.balances.income[k])}
+                                        >
+                                            {fmt(reportData.balances.income[k].amount)}
+                                        </td>
+                                    ))}
+                                </tr>
+                            )
+                        })()}
 
                         {/* Total Expenses */}
-                        <tr>
-                            <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem', color: '#c62828' }}>Total Expenses</td>
-                            <td className="sticky-col second-col num-col">{fmt(reportData.budgetTotals.expenses)}</td>
-                            {monthKeys.map(k => (
-                                <td
-                                    key={k}
-                                    className="num-col"
-                                    style={{ color: '#c62828', cursor: 'pointer' }}
-                                    onClick={() => handleCellClick(`Expenses - ${monthLabels[monthKeys.indexOf(k)]}`, reportData.balances.expenses[k])}
-                                >
-                                    {fmt(Math.abs(reportData.balances.expenses[k].amount))}
-                                </td>
-                            ))}
-                        </tr>
+                        {(() => {
+                            const expenseValues = monthKeys.map(k => Math.abs(reportData.balances.expenses[k]?.amount || 0))
+                            const expenseNonZero = expenseValues.filter(v => v > 0)
+                            const expenseAvg = expenseNonZero.length > 0 ? expenseNonZero.reduce((a, b) => a + b, 0) / expenseNonZero.length : 0
+                            return (
+                                <tr>
+                                    <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem', color: '#c62828' }}>Total Expenses</td>
+                                    <td className="sticky-col second-col num-col">{fmt(reportData.budgetTotals.expenses)}</td>
+                                    <td className="sticky-col third-col num-col" style={{ color: '#666', fontSize: '0.9em' }}>{fmt(expenseAvg)}</td>
+                                    {monthKeys.map(k => (
+                                        <td
+                                            key={k}
+                                            className="num-col"
+                                            style={{ color: '#c62828', cursor: 'pointer' }}
+                                            onClick={() => handleCellClick(`Expenses - ${monthLabels[monthKeys.indexOf(k)]}`, reportData.balances.expenses[k])}
+                                        >
+                                            {fmt(Math.abs(reportData.balances.expenses[k].amount))}
+                                        </td>
+                                    ))}
+                                </tr>
+                            )
+                        })()}
 
                         {/* Net Surplus/Deficit */}
-                        <tr>
-                            <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem', fontWeight: 500 }}>Net Surplus/Deficit</td>
-                            <td className="sticky-col second-col num-col" style={{ fontWeight: 'bold' }}>
-                                {fmt(reportData.budgetTotals.income - reportData.budgetTotals.expenses)}
-                            </td>
-                            {monthKeys.map(k => {
-                                const val = reportData.balances.net[k]
-                                return (
-                                    <td key={k} className="num-col" style={{ color: val < 0 ? '#d32f2f' : '#388e3c', fontWeight: 'bold' }}>
-                                        {fmt(val)}
+                        {(() => {
+                            const netValues = monthKeys.map(k => reportData.balances.net[k] || 0)
+                            const netNonZero = netValues.filter(v => v !== 0)
+                            const netAvg = netNonZero.length > 0 ? netNonZero.reduce((a, b) => a + b, 0) / netNonZero.length : 0
+                            return (
+                                <tr>
+                                    <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem', fontWeight: 500 }}>Net Surplus/Deficit</td>
+                                    <td className="sticky-col second-col num-col" style={{ fontWeight: 'bold' }}>
+                                        {fmt(reportData.budgetTotals.income - reportData.budgetTotals.expenses)}
                                     </td>
-                                )
-                            })}
-                        </tr>
+                                    <td className="sticky-col third-col num-col" style={{ color: netAvg < 0 ? '#d32f2f' : '#388e3c', fontSize: '0.9em', fontWeight: 'bold' }}>
+                                        {fmt(netAvg)}
+                                    </td>
+                                    {monthKeys.map(k => {
+                                        const val = reportData.balances.net[k]
+                                        return (
+                                            <td key={k} className="num-col" style={{ color: val < 0 ? '#d32f2f' : '#388e3c', fontWeight: 'bold' }}>
+                                                {fmt(val)}
+                                            </td>
+                                        )
+                                    })}
+                                </tr>
+                            )
+                        })()}
 
                         {/* Opening Balance (Editable Anchor First) */}
                         <tr>
@@ -1020,6 +1076,7 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                                     }}
                                 />
                             </td>
+                            <td className="sticky-col third-col num-col">-</td>
 
                             {monthKeys.map(k => (
                                 <td key={k} className="num-col">
@@ -1032,6 +1089,7 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                         <tr style={{ borderTop: '2px solid #ddd', backgroundColor: '#f9f9f9' }}>
                             <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem', fontWeight: 'bold' }}>Closing Balance</td>
                             <td className="sticky-col second-col num-col">-</td>
+                            <td className="sticky-col third-col num-col">-</td>
                             {monthKeys.map(k => (
                                 <td key={k} className="num-col" style={{ fontWeight: 'bold', color: '#12265E' }}>
                                     {fmt(reportData.balances.closing[k])}
