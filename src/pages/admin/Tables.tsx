@@ -91,13 +91,13 @@ export default function Tables() {
 
       snapshot.forEach(doc => {
         const docData = doc.data()
-        const docWithId = { id: doc.id, ...docData }
+        const docWithId: CollectionData = { id: doc.id, ...docData }
 
         // Add resolved userName if userId exists
         if (docData.userId && docData.userId !== 'SYSTEM') {
-          docWithId._userName = userMap[docData.userId] || docData.userId
+          docWithId['_userName'] = userMap[docData.userId] || docData.userId
         } else if (docData.userId === 'SYSTEM') {
-          docWithId._userName = 'SYSTEM'
+          docWithId['_userName'] = 'SYSTEM'
         }
 
         docs.push(docWithId)

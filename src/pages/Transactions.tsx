@@ -252,9 +252,11 @@ export default function Transactions() {
   }
 
   const [isAnalyzing, setIsAnalyzing] = useState(false)
+  // @ts-ignore - Reserved for future use: Update Mappings button
   const [isUpdatingMappings, setIsUpdatingMappings] = useState(false)
 
   // Re-apply all mapping rules to all transactions
+  // @ts-ignore - Reserved for future use: Update Mappings button
   async function updateAllMappings() {
     if (!currentUser) return
 

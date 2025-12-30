@@ -12,7 +12,8 @@
       "Bash(firebase firestore:delete:*)",
       "Bash(firebase use:*)",
       "Bash(firebase auth:export:*)",
-      "Bash(where:*)"
+      "Bash(where:*)",
+      "Bash(npm run build:*)"
     ],
     "deny": [],
     "ask": []
