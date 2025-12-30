@@ -16,18 +16,22 @@ interface Grouping {
   sortOrder: number
 }
 
-interface CategoryData {
+interface CategoryRow {
   name: string
-  type: string
+  type: string  // The grouping ID this category belongs to
   budget: number
-  isIncome: boolean
   months: { [key: string]: number }
+}
+
+interface SectionData {
+  rows: CategoryRow[]
+  isIncome: boolean
 }
 
 interface MonthlyTotals {
   income: number
-  fixedCosts: number  // Debit orders
-  variableExpenses: number  // Monthly/adhoc expenses
+  fixedCosts: number
+  variableExpenses: number
   totalExpenses: number
   net: number
 }
@@ -41,16 +45,14 @@ interface OverBudgetItem {
 
 export default function HighLevelAnalysis({ currentUser, monthStartDay }: Props) {
   const [loading, setLoading] = useState(true)
-  const [categoryData, setCategoryData] = useState<CategoryData[]>([])
+  const [sections, setSections] = useState<{ [groupId: string]: SectionData }>({})
   const [monthKeys, setMonthKeys] = useState<string[]>([])
   const [monthLabels, setMonthLabels] = useState<string[]>([])
   const [monthlyTotals, setMonthlyTotals] = useState<{ [key: string]: MonthlyTotals }>({})
   const [overBudgetItems, setOverBudgetItems] = useState<OverBudgetItem[]>([])
 
-  // View mode: 'average' (default) or a specific month key like '2024-12'
   const [viewMode, setViewMode] = useState<'average' | string>('average')
 
-  // Helper function to get fiscal month info
   function getFiscalMonthInfo(date: Date, startDay: number) {
     let year = date.getFullYear()
     let month = date.getMonth()
@@ -105,37 +107,25 @@ export default function HighLevelAnalysis({ currentUser, monthStartDay }: Props)
         setMonthKeys(keys)
         setMonthLabels(labels)
 
-        // Calculate date range for query
         const earliestKeyParts = keys[keys.length - 1].split('-').map(Number)
         const latestKeyParts = keys[0].split('-').map(Number)
 
         const { start: globalStart } = getRangeForFiscalMonth(earliestKeyParts[0], earliestKeyParts[1] - 1, monthStartDay)
         const { end: globalEnd } = getRangeForFiscalMonth(latestKeyParts[0], latestKeyParts[1] - 1, monthStartDay)
 
-        // Load system config for groupings and category type mappings
+        // Load system config for groupings
         let loadedGroupings: Grouping[] = []
-        const systemCategoryTypes = new Map<string, string>()
 
         try {
           const systemDoc = await getDoc(doc(db, 'systemConfig', 'main'))
           if (systemDoc.exists()) {
             const sData = systemDoc.data()
             loadedGroupings = sData.groupings || []
-
-            // Index default category type mappings
-            if (Array.isArray(sData.defaultCategories)) {
-              sData.defaultCategories.forEach((cat: { name?: string, type?: string }) => {
-                if (cat?.name && cat?.type) {
-                  systemCategoryTypes.set(cat.name.trim().toLowerCase(), cat.type)
-                }
-              })
-            }
           }
         } catch (e) {
           console.error("Error loading system config", e)
         }
 
-        // Fallback groupings if none loaded
         if (loadedGroupings.length === 0) {
           loadedGroupings = [
             { id: 'income', name: 'Income', isIncome: true, sortOrder: 0 },
@@ -144,85 +134,86 @@ export default function HighLevelAnalysis({ currentUser, monthStartDay }: Props)
           ]
         }
 
-        // Groupings loaded - used locally for classification
+        // Groupings loaded and used for section initialization
 
-        // Create a lookup for groupings by ID and name (case-insensitive)
-        const groupingById = new Map<string, Grouping>()
-        const groupingByName = new Map<string, Grouping>()
+        // Initialize sections - matching DashboardReport structure
+        const sectionsData: { [key: string]: SectionData } = {}
         loadedGroupings.forEach(g => {
-          groupingById.set(g.id.toLowerCase(), g)
-          groupingByName.set(g.name.toLowerCase(), g)
+          sectionsData[g.id] = { rows: [], isIncome: g.isIncome }
         })
 
-        // Helper to determine if a type is a fixed cost (debit order type)
-        const isFixedCostType = (type: string): boolean => {
-          const lowerType = type.toLowerCase()
-          // Check against grouping IDs and names
-          const grouping = groupingById.get(lowerType) || groupingByName.get(lowerType)
-          if (grouping) {
-            // Fixed costs are typically "debit_order" or similar non-income expense groupings
-            // that represent recurring fixed expenses
-            return !grouping.isIncome && (
-              lowerType.includes('debit') ||
-              lowerType.includes('fixed') ||
-              grouping.id.toLowerCase() === 'debit_order'
-            )
-          }
-          // Fallback string matching
-          return lowerType.includes('debit') || lowerType.includes('fixed')
-        }
-
-        // Helper to check if a type represents income
-        const isIncomeType = (type: string): boolean => {
-          const lowerType = type.toLowerCase()
-          const grouping = groupingById.get(lowerType) || groupingByName.get(lowerType)
-          if (grouping) {
-            return grouping.isIncome
-          }
-          return lowerType === 'income'
-        }
-
-        // Load budgets
+        // Load budgets and create rows map (same as DashboardReport)
         const budgetQuery = query(
           collection(db, 'budgets'),
           where('userId', '==', currentUser!.uid)
         )
         const budgetSnapshot = await getDocs(budgetQuery)
-        const budgetMap = new Map<string, CategoryData>()
 
-        console.log('=== Loading Budgets ===')
-        console.log('Groupings:', loadedGroupings)
-        console.log('System Category Types:', Object.fromEntries(systemCategoryTypes))
+        interface InternalRow {
+          name: string
+          type: string
+          budget: number
+          months: { [key: string]: number }
+        }
 
-        let budgetCount = 0
-        let incomeBudgetCount = 0
+        const rowsMap = new Map<string, InternalRow>()
+
         budgetSnapshot.forEach((docSnap) => {
-          budgetCount++
           const data = docSnap.data()
           const normName = data.name?.trim().toLowerCase() || ''
-          // Use system category type if available, otherwise use budget's type
-          const catType = systemCategoryTypes.get(normName) || data.type || 'monthly'
-          const isInc = isIncomeType(catType)
+          const type = data.type || 'monthly'
+          const amount = typeof data.amount === 'number' ? data.amount : parseFloat(data.amount) || 0
 
-          if (isInc) {
-            incomeBudgetCount++
-            console.log(`INCOME Budget: ${data.name}, normName: ${normName}, data.type: ${data.type}, systemType: ${systemCategoryTypes.get(normName)}, resolved catType: ${catType}`)
-          }
-
-          if (!budgetMap.has(normName)) {
-            budgetMap.set(normName, {
+          if (!rowsMap.has(normName)) {
+            const months: { [key: string]: number } = {}
+            keys.forEach(k => months[k] = 0)
+            rowsMap.set(normName, {
               name: data.name,
-              type: catType,
-              budget: typeof data.amount === 'number' ? data.amount : parseFloat(data.amount) || 0,
-              isIncome: isInc,
-              months: {}
+              type: type,
+              budget: amount,
+              months
             })
-            keys.forEach(k => budgetMap.get(normName)!.months[k] = 0)
           }
         })
-        console.log(`Loaded ${budgetCount} budgets, ${incomeBudgetCount} are income categories`)
 
-        // Load transactions
+        // Push rows to sections (same logic as DashboardReport)
+        rowsMap.forEach((row) => {
+          let targetType = row.type
+          let targetGroup = loadedGroupings.find(g => g.id === targetType)
+
+          // Case-insensitive ID match
+          if (!targetGroup) {
+            targetGroup = loadedGroupings.find(g => g.id.toLowerCase() === targetType.toLowerCase())
+            if (targetGroup) targetType = targetGroup.id
+          }
+
+          // Name match
+          if (!targetGroup) {
+            targetGroup = loadedGroupings.find(g => g.name.toLowerCase() === targetType.toLowerCase())
+            if (targetGroup) targetType = targetGroup.id
+          }
+
+          // Create dynamic group if not found
+          if (!targetGroup) {
+            const newId = targetType.replace(/\s+/g, '_').toLowerCase()
+            targetGroup = { id: newId, name: targetType, isIncome: false, sortOrder: 999 }
+            loadedGroupings.push(targetGroup)
+            sectionsData[newId] = { rows: [], isIncome: false }
+            targetType = newId
+          }
+
+          const section = sectionsData[targetType]
+          if (section) {
+            section.rows.push({
+              name: row.name,
+              type: targetType,
+              budget: row.budget,
+              months: row.months
+            })
+          }
+        })
+
+        // Load transactions and assign to rows (same as DashboardReport)
         const txQuery = query(
           collection(db, 'transactions'),
           where('userId', '==', currentUser!.uid)
@@ -271,27 +262,39 @@ export default function HighLevelAnalysis({ currentUser, monthStartDay }: Props)
           const catName = txn.categoryName || ''
           const normCatName = catName.trim().toLowerCase()
 
-          // Update category data (for per-category tracking)
-          if (budgetMap.has(normCatName)) {
-            budgetMap.get(normCatName)!.months[key] += Math.abs(amount)
+          // Find the row this transaction belongs to
+          let found = false
+          for (const groupId of Object.keys(sectionsData)) {
+            const row = sectionsData[groupId].rows.find(r =>
+              r.name.trim().toLowerCase() === normCatName
+            )
+            if (row) {
+              // Add transaction amount to the row (use raw amount like DashboardReport)
+              row.months[key] += amount
+              found = true
+              break
+            }
           }
 
-          // Get category type for classification
-          const catData = budgetMap.get(normCatName)
-          const catType = catData?.type || systemCategoryTypes.get(normCatName) || 'monthly'
-
-          // Update monthly totals based on amount sign and category type
-          // For monthly totals, we track raw per-month values
-          if (amount > 0 || isIncomeType(catType)) {
-            totals[key].income += Math.abs(amount)
-          } else {
-            totals[key].totalExpenses += Math.abs(amount)
-
-            // Classify expense by category type
-            if (isFixedCostType(catType)) {
-              totals[key].fixedCosts += Math.abs(amount)
-            } else {
-              totals[key].variableExpenses += Math.abs(amount)
+          // Update monthly totals based on which section the transaction belongs to
+          if (found) {
+            for (const groupId of Object.keys(sectionsData)) {
+              const section = sectionsData[groupId]
+              const row = section.rows.find(r => r.name.trim().toLowerCase() === normCatName)
+              if (row) {
+                if (section.isIncome) {
+                  totals[key].income += Math.abs(amount)
+                } else {
+                  totals[key].totalExpenses += Math.abs(amount)
+                  // Classify as fixed or variable
+                  if (groupId === 'debit_order' || groupId.includes('debit') || groupId.includes('fixed')) {
+                    totals[key].fixedCosts += Math.abs(amount)
+                  } else {
+                    totals[key].variableExpenses += Math.abs(amount)
+                  }
+                }
+                break
+              }
             }
           }
         })
@@ -301,28 +304,28 @@ export default function HighLevelAnalysis({ currentUser, monthStartDay }: Props)
           totals[k].net = totals[k].income - totals[k].totalExpenses
         })
 
-        // Calculate over-budget items for the latest month (only for expense categories)
+        // Calculate over-budget items for latest month
         const latestMonth = keys[0]
         const overBudget: OverBudgetItem[] = []
 
-        budgetMap.forEach((cat) => {
-          // Skip income categories
-          if (cat.isIncome) return
-
-          const actual = cat.months[latestMonth] || 0
-          if (cat.budget > 0 && actual > cat.budget) {
-            overBudget.push({
-              category: cat.name,
-              budget: cat.budget,
-              actual: actual,
-              over: actual - cat.budget
-            })
-          }
+        Object.values(sectionsData).forEach(section => {
+          if (section.isIncome) return
+          section.rows.forEach(row => {
+            const actual = Math.abs(row.months[latestMonth] || 0)
+            if (row.budget > 0 && actual > row.budget) {
+              overBudget.push({
+                category: row.name,
+                budget: row.budget,
+                actual: actual,
+                over: actual - row.budget
+              })
+            }
+          })
         })
 
         overBudget.sort((a, b) => b.over - a.over)
 
-        setCategoryData(Array.from(budgetMap.values()))
+        setSections(sectionsData)
         setMonthlyTotals(totals)
         setOverBudgetItems(overBudget)
 
@@ -336,63 +339,40 @@ export default function HighLevelAnalysis({ currentUser, monthStartDay }: Props)
     loadData()
   }, [currentUser, monthStartDay])
 
-  // Calculate values based on view mode (average or specific month)
-  // For averages: calculate per-category average first, then sum (same as DashboardReport)
+  // Calculate values based on view mode - EXACTLY matching DashboardReport
   const summaryValues = useMemo(() => {
-    if (monthKeys.length === 0) return null
+    if (monthKeys.length === 0 || Object.keys(sections).length === 0) return null
 
     if (viewMode === 'average') {
-      // Calculate averages per category, then sum - matching DashboardReport logic exactly
-      // Only count non-zero months for each category's average
+      // Calculate per-category averages, then sum - EXACTLY like DashboardReport lines 1073-1140
       let incomeAvgTotal = 0
       let fixedCostsAvgTotal = 0
       let variableExpensesAvgTotal = 0
       let totalExpensesAvgTotal = 0
 
-      // Debug: log category classification
-      console.log('=== Category Classification for Averages ===')
+      Object.entries(sections).forEach(([groupId, section]) => {
+        section.rows.forEach(row => {
+          // Use Math.abs like DashboardReport line 1080
+          const monthValues = monthKeys.map(k => Math.abs(row.months[k] || 0))
+          const nonZeroValues = monthValues.filter(v => v > 0)
 
-      categoryData.forEach(cat => {
-        // Get non-zero months for this category
-        const monthValues = monthKeys.map(k => cat.months[k] || 0)
-        const nonZeroValues = monthValues.filter(v => v > 0)
+          if (nonZeroValues.length > 0) {
+            const rowAvg = nonZeroValues.reduce((a, b) => a + b, 0) / nonZeroValues.length
 
-        if (nonZeroValues.length > 0) {
-          const catTotal = nonZeroValues.reduce((a, b) => a + b, 0)
-          const catAvg = catTotal / nonZeroValues.length
-
-          // Detailed logging for income categories
-          if (cat.isIncome) {
-            console.log(`INCOME Category: ${cat.name}`)
-            console.log(`  Type: ${cat.type}`)
-            console.log(`  Month values: ${JSON.stringify(monthValues)}`)
-            console.log(`  Non-zero values: ${JSON.stringify(nonZeroValues)}`)
-            console.log(`  Total: ${catTotal}, Count: ${nonZeroValues.length}, Avg: ${catAvg}`)
-          } else {
-            console.log(`Expense Category: ${cat.name}, Type: ${cat.type}, Total: ${catTotal}, NonZeroMonths: ${nonZeroValues.length}, Avg: ${catAvg}`)
-          }
-
-          if (cat.isIncome) {
-            incomeAvgTotal += catAvg
-          } else {
-            totalExpensesAvgTotal += catAvg
-
-            // Classify by type for fixed vs variable
-            const lowerType = cat.type.toLowerCase()
-            if (lowerType.includes('debit') || lowerType.includes('fixed') || lowerType === 'debit_order') {
-              fixedCostsAvgTotal += catAvg
+            if (section.isIncome) {
+              incomeAvgTotal += rowAvg
             } else {
-              variableExpensesAvgTotal += catAvg
+              totalExpensesAvgTotal += rowAvg
+              // Classify as fixed or variable
+              if (groupId === 'debit_order' || groupId.includes('debit') || groupId.includes('fixed')) {
+                fixedCostsAvgTotal += rowAvg
+              } else {
+                variableExpensesAvgTotal += rowAvg
+              }
             }
           }
-        }
+        })
       })
-
-      console.log('=== Final Totals ===')
-      console.log(`Income Avg Total: ${incomeAvgTotal}`)
-      console.log(`Expenses Avg Total: ${totalExpensesAvgTotal}`)
-      console.log(`Fixed Costs Avg: ${fixedCostsAvgTotal}`)
-      console.log(`Variable Expenses Avg: ${variableExpensesAvgTotal}`)
 
       return {
         income: incomeAvgTotal,
@@ -403,7 +383,6 @@ export default function HighLevelAnalysis({ currentUser, monthStartDay }: Props)
         isAverage: true
       }
     } else {
-      // Use specific month data
       const monthData = monthlyTotals[viewMode]
       if (!monthData) return null
 
@@ -416,34 +395,37 @@ export default function HighLevelAnalysis({ currentUser, monthStartDay }: Props)
         isAverage: false
       }
     }
-  }, [monthlyTotals, monthKeys, viewMode, categoryData])
+  }, [sections, monthlyTotals, monthKeys, viewMode])
 
-  // Get top 5 spending categories (excluding income, based on view mode)
+  // Get top 5 spending categories (excluding income)
   const topCategories = useMemo(() => {
-    const catValues = categoryData
-      .filter(cat => !cat.isIncome) // Exclude income categories
-      .map(cat => {
+    const catValues: { name: string, value: number }[] = []
+
+    Object.entries(sections).forEach(([, section]) => {
+      if (section.isIncome) return // Skip income
+
+      section.rows.forEach(row => {
         let value: number
         if (viewMode === 'average') {
-          // Calculate average using non-zero months
-          const nonZeroValues = monthKeys
-            .map(k => cat.months[k] || 0)
-            .filter(v => v > 0)
+          const monthValues = monthKeys.map(k => Math.abs(row.months[k] || 0))
+          const nonZeroValues = monthValues.filter(v => v > 0)
           value = nonZeroValues.length > 0
             ? nonZeroValues.reduce((a, b) => a + b, 0) / nonZeroValues.length
             : 0
         } else {
-          // Use specific month value
-          value = cat.months[viewMode] || 0
+          value = Math.abs(row.months[viewMode] || 0)
         }
-        return { name: cat.name, value, type: cat.type }
+
+        if (value > 0) {
+          catValues.push({ name: row.name, value })
+        }
       })
+    })
 
     return catValues
-      .filter(c => c.value > 0)
       .sort((a, b) => b.value - a.value)
       .slice(0, 5)
-  }, [categoryData, monthKeys, viewMode])
+  }, [sections, monthKeys, viewMode])
 
   const formatAmount = (amount: number) => {
     return new Intl.NumberFormat('en-ZA', {
@@ -464,14 +446,12 @@ export default function HighLevelAnalysis({ currentUser, monthStartDay }: Props)
 
   const maxCategoryValue = topCategories.length > 0 ? topCategories[0].value : 1
 
-  // Get the label for the current view mode
   const getViewModeLabel = () => {
     if (viewMode === 'average') return 'Average'
     const idx = monthKeys.indexOf(viewMode)
     return idx >= 0 ? monthLabels[idx] : viewMode
   }
 
-  // Get last 6 months for charts (reverse to show oldest to newest)
   const chartMonths = monthKeys.slice(0, 6).reverse()
   const chartLabels = monthLabels.slice(0, 6).reverse()
   const maxNet = Math.max(...chartMonths.map(k => Math.abs(monthlyTotals[k]?.net || 0)), 1)
