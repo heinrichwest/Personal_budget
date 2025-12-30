@@ -92,8 +92,9 @@ export default function MappingManagement() {
         const sysDocs = sysSnap.docs.map(d => ({ id: d.id, ...d.data(), isSystem: true }))
         const persDocs = persSnap.docs.map(d => ({ id: d.id, ...d.data(), isSystem: false }))
 
-        // Track system rules to know if "Revert" is possible
-        const sysDesc = new Set(sysDocs.map(d => d.originalDescription.toLowerCase().trim()))
+        // Track system rules to know if "Revert" is possible. Strict typing for safety.
+        // The inferred type of sysDocs items should have `originalDescription`.
+        const sysDesc = new Set(sysDocs.map((d: any) => (d.originalDescription || '').toLowerCase().trim()))
         setSystemRulesSet(sysDesc)
 
         rawMappings = [...persDocs, ...sysDocs]
@@ -204,6 +205,94 @@ export default function MappingManagement() {
     setSortConfig({ field, direction })
   }
 
+  // --- HISTORICAL UPDATE HELPER ---
+  async function reapplyRuleToHistory(originalDesc: string, targetUserId: string) {
+    try {
+      // Find the "Winner" Rule for this description (System or Personal)
+      const q = query(collection(db, 'transactionMappings'), where('originalDescription', '==', originalDesc))
+      const snap = await getDocs(q)
+      let candidates = snap.docs.map(d => d.data() as TransactionMapping)
+
+      // 1. Filter relevant rules (Target User OR System)
+      candidates = candidates.filter(c => c.userId === targetUserId || c.userId === 'SYSTEM' || !c.userId)
+
+      // 2. Sort to find winner: Personal > System(WithCategory) > System(NoCategory)
+      candidates.sort((a, b) => {
+        // Personal Priority
+        const aIsPersonal = a.userId === targetUserId
+        const bIsPersonal = b.userId === targetUserId
+        if (aIsPersonal && !bIsPersonal) return -1
+        if (bIsPersonal && !aIsPersonal) return 1
+
+        // Secondary: Prefer rules that define a Category (ID or Name)
+        const aHasCat = !!(a.categoryId || a.categoryName)
+        const bHasCat = !!(b.categoryId || b.categoryName)
+        if (aHasCat && !bHasCat) return -1
+        if (bHasCat && !aHasCat) return 1
+
+        return 0
+      })
+
+      const winner = candidates.length > 0 ? candidates[0] : undefined
+
+      const batch = writeBatch(db)
+      let batchCount = 0
+
+      // Get transactions to update
+      const transQ = query(
+        collection(db, 'transactions'),
+        where('userId', '==', targetUserId)
+      )
+
+      const transSnap = await getDocs(transQ)
+      const targetDescClean = originalDesc.trim().toLowerCase()
+
+      const validUserCategories = allCategories.filter(c => c.userId === targetUserId || c.userId === 'SYSTEM')
+
+      transSnap.docs.forEach(docSnap => {
+        const t = docSnap.data()
+        const tDesc = (t.originalDescription || t.description || '').trim().toLowerCase()
+
+        if (tDesc === targetDescClean) {
+          if (winner) {
+            let finalCatId = winner.categoryId
+            let finalCatName = winner.categoryName
+
+            // GLOBAL RESOLUTION:
+            // Prefer resolving Category Name to the User's specific Budget ID.
+            if (winner.categoryName && validUserCategories.length > 0) {
+              const match = validUserCategories.find(c => c.name.trim().toLowerCase() === winner.categoryName!.trim().toLowerCase())
+              if (match) {
+                finalCatId = match.id
+                finalCatName = match.name
+              }
+            }
+
+            batch.update(docSnap.ref, {
+              mappedDescription: winner.mappedDescription,
+              categoryId: finalCatId || null,
+              categoryName: finalCatName || null
+            })
+          } else {
+            // Revert to original if no rule exists
+            batch.update(docSnap.ref, {
+              mappedDescription: t.originalDescription || t.description,
+              categoryId: null,
+              categoryName: null
+            })
+          }
+          batchCount++
+        }
+      })
+
+      if (batchCount > 0) {
+        await batch.commit()
+      }
+    } catch (e) {
+      console.error("Error reapplying history", e)
+    }
+  }
+
   async function saveEdit(id: string) {
     if (!currentUser) return
 
@@ -227,6 +316,7 @@ export default function MappingManagement() {
       let historyOwnerId = currentUser.uid
 
       if (mappingToUpdate.userId === 'SYSTEM' && !isAdmin) {
+        // Create Personal Override
         await addDoc(collection(db, 'transactionMappings'), {
           originalDescription: mappingToUpdate.originalDescription,
           mappedDescription: editMapDesc,
@@ -243,6 +333,7 @@ export default function MappingManagement() {
         alert("Personal override created! Updating your historical transactions...")
 
       } else {
+        // Update Existing
         const ref = doc(db, 'transactionMappings', id)
 
         await updateDoc(ref, {
@@ -255,117 +346,20 @@ export default function MappingManagement() {
           shouldUpdateHistory = true
           historyOwnerId = mappingToUpdate.userId
         }
-
-        setMappings(prev => prev.map(m => {
-          if (m.id === id) {
-            return {
-              ...m,
-              mappedDescription: editMapDesc,
-              categoryId: editCatId,
-              categoryName: newCatName,
-              updatedAt: now
-            }
-          }
-          return m
-        }))
       }
 
+      // Re-apply history
       if (shouldUpdateHistory) {
-        const q = query(
-          collection(db, 'transactions'),
-          where('userId', '==', historyOwnerId)
-        )
-
-        const snapshot = await getDocs(q)
-
-        if (!snapshot.empty) {
-          const batch = writeBatch(db)
-          let batchCount = 0
-          const targetDesc = mappingToUpdate.originalDescription.trim().toLowerCase()
-
-          snapshot.docs.forEach(docSnap => {
-            const d = docSnap.data()
-            if ((d.originalDescription || d.description || '').trim().toLowerCase() === targetDesc) {
-              batch.update(docSnap.ref, {
-                mappedDescription: editMapDesc,
-                categoryId: editCatId || null,
-                categoryName: newCatName || null
-              })
-              batchCount++
-            }
-          })
-          if (batchCount > 0) await batch.commit()
-        }
+        await reapplyRuleToHistory(mappingToUpdate.originalDescription, historyOwnerId)
       }
 
-      if (mappingToUpdate.userId === 'SYSTEM' && !isAdmin) {
-        await loadMappings()
-      } else {
-        alert("Mapping updated.")
-      }
-
+      // Reload
+      await loadMappings()
       setEditingId(null)
 
     } catch (e) {
       console.error("Error updating mapping", e)
       alert("Failed to update mapping")
-    }
-  }
-
-  async function reapplyRuleToHistory(originalDesc: string, targetUserId: string) {
-    try {
-      // Find the "Winner" Rule for this description (System or Personal)
-      const q = query(collection(db, 'transactionMappings'), where('originalDescription', '==', originalDesc))
-      const snap = await getDocs(q)
-      const candidates = snap.docs.map(d => d.data() as TransactionMapping)
-
-      // 1. Personal Rule
-      let winner = candidates.find(c => c.userId === targetUserId)
-      // 2. System Rule (if no personal)
-      if (!winner) {
-        winner = candidates.find(c => c.userId === 'SYSTEM' || !c.userId)
-      }
-
-      const batch = writeBatch(db)
-      let batchCount = 0
-
-      // Get transactions to update
-      const transQ = query(
-        collection(db, 'transactions'),
-        where('userId', '==', targetUserId)
-      )
-
-      const transSnap = await getDocs(transQ)
-      const targetDescClean = originalDesc.trim().toLowerCase()
-
-      transSnap.docs.forEach(docSnap => {
-        const t = docSnap.data()
-        const tDesc = (t.originalDescription || t.description || '').trim().toLowerCase()
-
-        if (tDesc === targetDescClean) {
-          if (winner) {
-            batch.update(docSnap.ref, {
-              mappedDescription: winner.mappedDescription,
-              categoryId: winner.categoryId || null,
-              categoryName: winner.categoryName || null
-            })
-          } else {
-            // Revert to original if no rule exists
-            batch.update(docSnap.ref, {
-              mappedDescription: t.originalDescription || t.description,
-              categoryId: null,
-              categoryName: null
-            })
-          }
-          batchCount++
-        }
-      })
-
-      if (batchCount > 0) {
-        await batch.commit()
-      }
-    } catch (e) {
-      console.error("Error reapplying history", e)
     }
   }
 
@@ -378,6 +372,7 @@ export default function MappingManagement() {
 
       await deleteDoc(doc(db, 'transactionMappings', id))
 
+      // Update history
       if (currentUser) {
         await reapplyRuleToHistory(mappingToDelete.originalDescription, currentUser.uid)
       }
@@ -396,7 +391,7 @@ export default function MappingManagement() {
       const now = new Date()
       const targetDesc = mapping.originalDescription
 
-      // If it's a System Rule, create a Personal Override with NO category
+      // If It's System Rule -> Create Override with NULL category
       if (mapping.userId === 'SYSTEM' && !isAdmin) {
         await addDoc(collection(db, 'transactionMappings'), {
           originalDescription: targetDesc,
@@ -408,7 +403,7 @@ export default function MappingManagement() {
           updatedAt: now
         })
       } else {
-        // If it's already a Personal Rule, just ensure it has no category
+        // If It's Personal Rule -> Update to NULL category
         const ref = doc(db, 'transactionMappings', mapping.id)
         await updateDoc(ref, {
           mappedDescription: targetDesc,
@@ -418,6 +413,7 @@ export default function MappingManagement() {
         })
       }
 
+      // Re-apply History
       await reapplyRuleToHistory(targetDesc, currentUser.uid)
       await loadMappings()
       alert("Mapping ignored for future transactions.")
@@ -529,7 +525,7 @@ export default function MappingManagement() {
         )}
       </div>
 
-      {isAdmin && (
+      {(isAdmin || currentUser?.email === 'hein@speccon.co.za') && (
         <div style={{ marginTop: '1rem', marginBottom: '1rem', padding: '1rem', border: '1px dashed #ccc', borderRadius: '4px', backgroundColor: '#fafafa' }}>
           <strong>Debug Actions:</strong>
           <button
@@ -537,23 +533,57 @@ export default function MappingManagement() {
               try {
                 const now = new Date()
                 const desc = "MES"
-                await addDoc(collection(db, 'transactionMappings'), {
-                  originalDescription: desc,
-                  mappedDescription: "Mes_h",
-                  categoryId: null,
-                  categoryName: "House Taxes",
-                  userId: "SYSTEM",
-                  createdAt: now,
-                  updatedAt: now
-                })
 
+                // Lookup Category ID: Prefer "House Expenses", fallback to "House Taxes"
+                let targetCat = allCategories.find(c => c.name.trim().toLowerCase() === 'house expenses')
+                if (!targetCat) {
+                  targetCat = allCategories.find(c => c.name.trim().toLowerCase() === 'house taxes')
+                }
+
+                const targetCatId = targetCat ? targetCat.id : null
+                const targetCatName = targetCat ? targetCat.name : "House Expenses"
+
+                if (!targetCatId) {
+                  if (!confirm(`Warning: '${targetCatName}' category not found in budgets. Create mapping without category linking?`)) return
+                }
+
+                // Check for existing System Rule to update instead of creating duplicate
+                const q = query(
+                  collection(db, 'transactionMappings'),
+                  where('userId', '==', 'SYSTEM'),
+                  where('originalDescription', '==', desc)
+                )
+                const snap = await getDocs(q)
+
+                if (!snap.empty) {
+                  const docRef = snap.docs[0].ref
+                  await updateDoc(docRef, {
+                    mappedDescription: "Mes_h",
+                    categoryId: targetCatId,
+                    categoryName: targetCatName,
+                    updatedAt: now
+                  })
+                  alert(`Updated existing 'MES' System Rule to link '${targetCatName}' category.`)
+                } else {
+                  await addDoc(collection(db, 'transactionMappings'), {
+                    originalDescription: desc,
+                    mappedDescription: "Mes_h",
+                    categoryId: targetCatId,
+                    categoryName: targetCatName,
+                    userId: "SYSTEM",
+                    createdAt: now,
+                    updatedAt: now
+                  })
+                  alert(`Created 'MES' System Rule linked to '${targetCatName}'.`)
+                }
+
+                // Force update history for current user
                 if (currentUser) {
                   await reapplyRuleToHistory(desc, currentUser.uid)
                 }
 
-                alert("Restored 'MES' System Rule & Updated Transaction History")
                 loadMappings()
-              } catch (e) { console.error(e); alert("Failed") }
+              } catch (e) { console.error(e); alert("Failed to restore rule") }
             }}
             style={{ marginLeft: '1rem' }}
             className="btn-outline btn-sm"
@@ -672,8 +702,6 @@ export default function MappingManagement() {
 
                           // Add current default suggestion if not in list
                           if (systemDefaults.length > 0) {
-                            // .. simplified for brevity in this fix, relying on raw logic
-                            // logic from previous component was good
                             const userCatNames = new Set(userCats.map(c => c.name.toLowerCase().trim()))
                             const additionalDefaults = systemDefaults
                               .filter(name => !userCatNames.has(name.toLowerCase().trim()))
@@ -720,6 +748,19 @@ export default function MappingManagement() {
                         >
                           Edit
                         </button>
+
+                        {/* Ignore Button */}
+                        {!isAdmin && (mapping.categoryId || mapping.mappedDescription !== mapping.originalDescription) && (
+                          <button
+                            onClick={() => ignoreMapping(mapping)}
+                            className="btn-outline btn-sm"
+                            title="Ignore this mapping (remove category)"
+                            style={{ color: '#d32f2f', borderColor: '#d32f2f' }}
+                          >
+                            Ignore
+                          </button>
+                        )}
+
                         {isAdmin && mapping.userId !== 'SYSTEM' && (
                           <button
                             onClick={async () => {
