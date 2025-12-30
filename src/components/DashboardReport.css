@@ -93,10 +93,25 @@
     border-right: 2px solid #ddd;
 }
 
-/* Header Z-Index fix for intersection */
+/* Header Z-Index fix for intersection - sticky both horizontally AND vertically */
 .report-table thead th.sticky-col {
-    z-index: 30;
+    z-index: 40;
     background-color: #f9fafb;
+}
+
+.report-table thead th.sticky-col.first-col {
+    z-index: 40;
+    left: 0;
+}
+
+.report-table thead th.sticky-col.second-col {
+    z-index: 40;
+    left: 200px;
+}
+
+.report-table thead th.sticky-col.third-col {
+    z-index: 40;
+    left: 300px;
 }
 
 /* Column Specifics */

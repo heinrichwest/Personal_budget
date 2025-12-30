@@ -1,8 +1,50 @@
 import React, { useEffect, useState } from 'react'
-import { collection, query, where, getDocs, doc, getDoc, updateDoc, setDoc } from 'firebase/firestore'
+import { collection, query, where, getDocs, doc, getDoc, updateDoc, setDoc, addDoc } from 'firebase/firestore'
 import { db } from '../config/firebase'
 import { BudgetCategory } from '../pages/Budget.tsx'
 import './DashboardReport.css'
+
+// Controlled Budget Input Component
+interface BudgetInputProps {
+    value: number
+    onSave: (newValue: string) => void
+}
+
+function BudgetInput({ value, onSave }: BudgetInputProps) {
+    const formatValue = (n: number) => n === 0 ? '' : Math.round(n).toLocaleString('en-ZA').replace(/,/g, ' ')
+    const [displayValue, setDisplayValue] = useState(formatValue(value))
+    const [isFocused, setIsFocused] = useState(false)
+
+    // Sync with external value when not focused
+    useEffect(() => {
+        if (!isFocused) {
+            setDisplayValue(formatValue(value))
+        }
+    }, [value, isFocused])
+
+    const handleBlur = () => {
+        setIsFocused(false)
+        const cleanVal = displayValue.replace(/\s/g, '').replace(/,/g, '')
+        onSave(cleanVal)
+    }
+
+    return (
+        <input
+            type="text"
+            value={displayValue}
+            className="budget-input"
+            placeholder="0"
+            onChange={(e) => setDisplayValue(e.target.value)}
+            onFocus={() => setIsFocused(true)}
+            onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                    e.currentTarget.blur()
+                }
+            }}
+            onBlur={handleBlur}
+        />
+    )
+}
 
 interface ReportProps {
     currentUser: any
@@ -75,13 +117,16 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
     const [editingTxn, setEditingTxn] = useState<Transaction | null>(null)
     const [allBudgets, setAllBudgets] = useState<BudgetCategory[]>([])
 
+    // Force refresh counter - increment to force re-render after budget updates
+    const [refreshKey, setRefreshKey] = useState(0)
+
     // Modal Sorting
     const [sortConfig, setSortConfig] = useState<{ field: keyof Transaction | 'mappedDescription', direction: 'asc' | 'desc' }>({ field: 'date', direction: 'desc' })
 
     useEffect(() => {
         if (!currentUser) return
         generateReport()
-    }, [currentUser, monthStartDay])
+    }, [currentUser, monthStartDay, refreshKey])
 
     // Helper to get fiscal month key (YYYY-MM) and range for a given date
     function getFiscalMonthInfo(date: Date, startDay: number) {
@@ -169,20 +214,22 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
             // 1.5 Fetch System Config for Groupings and Category Mappings
             let groupings: any[] = []
             let systemCategoryTypes = new Map<string, string>()
+            let systemDefaultCategories: Array<{ name: string, type: string }> = []
 
             try {
-                // Previously was getDoc('main'), let's stick to that or query if safer. 
+                // Previously was getDoc('main'), let's stick to that or query if safer.
                 // SystemConfig.tsx saves to 'main'.
                 const systemDoc = await getDoc(doc(db, 'systemConfig', 'main'))
                 if (systemDoc.exists()) {
                     const sData = systemDoc.data()
                     groupings = sData.groupings || []
 
-                    // Index default category mappings
+                    // Index default category mappings AND store them for dropdown
                     if (Array.isArray(sData.defaultCategories)) {
                         sData.defaultCategories.forEach((cat: any) => {
                             if (cat && cat.name && cat.type) {
                                 systemCategoryTypes.set(cat.name.trim().toLowerCase(), cat.type)
+                                systemDefaultCategories.push({ name: cat.name, type: cat.type })
                             }
                         })
                     }
@@ -197,6 +244,7 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                                 // handle both string and object format
                                 if (typeof cat === 'object' && cat.name && cat.type) {
                                     systemCategoryTypes.set(cat.name.trim().toLowerCase(), cat.type)
+                                    systemDefaultCategories.push({ name: cat.name, type: cat.type })
                                 }
                             })
                         }
@@ -269,7 +317,11 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
             })
 
             // Combine Explicit Budgets + Implicit Discovered Categories
+            // IMPORTANT: Put allBudgetItems FIRST so their IDs are prioritized in rowsMap
             const combinedBudgets = [...allBudgetItems, ...discovered]
+
+            // Track which IDs are real budget documents (not discovered from transactions)
+            const realBudgetIds = new Set(allBudgetItems.map(b => b.id))
 
             // Deduplicate by name, prioritizing specific types over generic 'monthly'
             const budgetMap = new Map<string, BudgetCategory>()
@@ -293,13 +345,31 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                 }
             })
 
+            // Add system default categories that aren't already in the map
+            // These categories may exist in systemConfig but user hasn't created a budget for them yet
+            systemDefaultCategories.forEach(sysCat => {
+                const normName = sysCat.name.trim().toLowerCase()
+                if (!budgetMap.has(normName)) {
+                    // Create a pseudo-budget for dropdown purposes
+                    // Use a generated ID based on the name (prefixed to distinguish from real IDs)
+                    budgetMap.set(normName, {
+                        id: `sys_${normName.replace(/\s+/g, '_')}`,
+                        name: sysCat.name,
+                        amount: 0,
+                        userId: currentUser.uid,
+                        type: sysCat.type
+                    })
+                }
+            })
+
             const uniqueBudgets = Array.from(budgetMap.values())
             uniqueBudgets.sort((a, b) => a.name.localeCompare(b.name))
 
             setAllBudgets(uniqueBudgets)
 
-            // Use combined for rows generation
-            const rawBudgets = combinedBudgets
+            // Use uniqueBudgets for rows generation (includes system defaults)
+            // This ensures system categories appear as rows in the report
+            const rawBudgets = uniqueBudgets
 
             // 4. Initialize Data Structure
             const initSection = () => ({ rows: [], totalBudget: 0, totalMonths: {} })
@@ -319,6 +389,7 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
 
             interface InternalCategoryRow {
                 ids: string[]
+                primaryId: string // The ID to use for budget updates (real budget doc ID)
                 name: string
                 budget: number
                 months: { [key: string]: CellData }
@@ -332,10 +403,12 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                 const normName = cat.name.trim().toLowerCase()
                 const type = cat.type || 'monthly'
                 const amount = typeof cat.amount === 'number' ? cat.amount : parseFloat(cat.amount as any) || 0
+                const isRealBudget = realBudgetIds.has(cat.id!)
 
                 if (!rowsMap.has(normName)) {
                     rowsMap.set(normName, {
                         ids: [cat.id!],
+                        primaryId: cat.id!, // First one becomes primary
                         name: cat.name,
                         budget: amount,
                         months: {},
@@ -346,7 +419,16 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                 } else {
                     const existing = rowsMap.get(normName)!
                     existing.ids.push(cat.id!)
-                    existing.budget += amount
+
+                    // If this is a real budget doc and current primary is not, upgrade primary
+                    if (isRealBudget && !realBudgetIds.has(existing.primaryId)) {
+                        existing.primaryId = cat.id!
+                        existing.budget = amount // Use the real budget's amount
+                    } else if (isRealBudget) {
+                        // Both are real budgets, sum amounts
+                        existing.budget += amount
+                    }
+                    // If neither is a real budget or existing is already real, don't add amount from discovered
 
                     // Smart Type Merge: If existing is generic 'monthly' but new is specific, upgrade it.
                     if (existing.type === 'monthly' && type !== 'monthly') {
@@ -389,7 +471,7 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                 // Final safety check
                 if (section) {
                     const finalRow: CategoryRow = {
-                        id: row.ids[0],
+                        id: row.primaryId, // Use primaryId (real budget doc) for updates
                         name: row.name,
                         budget: row.budget,
                         months: row.months
@@ -402,7 +484,7 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                     // Should technically never happen due to step 3, but safe fallback
                     const fallback = groupings.find(g => !g.isIncome) || groupings[0]
                     sections[fallback.id].rows.push({
-                        id: row.ids[0], name: row.name, budget: row.budget, months: row.months, ids: row.ids
+                        id: row.primaryId, name: row.name, budget: row.budget, months: row.months, ids: row.ids
                     } as any)
                     sections[fallback.id].totalBudget += row.budget
                 }
@@ -717,8 +799,15 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
             if (editingTxn.mappedDescription !== undefined) {
                 updateData.mappedDescription = editingTxn.mappedDescription
             }
+            // Handle categoryId - if it's a system category (sys_ prefix), store null for ID but keep name
             if (editingTxn.categoryId !== undefined) {
-                updateData.categoryId = editingTxn.categoryId || null
+                const catId = editingTxn.categoryId
+                if (catId && catId.startsWith('sys_')) {
+                    // System category - don't store the fake ID, matching will use name
+                    updateData.categoryId = null
+                } else {
+                    updateData.categoryId = catId || null
+                }
             }
             if (editingTxn.categoryName !== undefined) {
                 updateData.categoryName = editingTxn.categoryName || null
@@ -741,78 +830,58 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
 
     // Handle Budget Update
     const handleBudgetUpdate = async (rowId: string, newValue: string) => {
-        const val = parseFloat(newValue)
+        // Handle empty string as 0
+        const val = newValue === '' ? 0 : parseFloat(newValue)
         if (isNaN(val)) return
-
-        // blocked updates if reportData is missing
         if (!reportData) return
 
         try {
-            // 1. Optimistically Update State
-            // Deep copy structure we intend to mutate
-            const newReportData = { ...reportData }
-            const newSections = { ...newReportData.sections }
-            const newBudgetTotals = { ...newReportData.budgetTotals }
+            // 1. Find the row to get its details
+            let rowName = ''
+            let rowType = 'monthly'
+            let currentBudget = 0
 
-            let found = false
-            let isIncomeSection = false
-            for (const unionId of Object.keys(newSections)) {
-                // Find section containing this row
-                const section = newSections[unionId]
-                const rowIndex = section.rows.findIndex(r => r.id === rowId)
-
-                if (rowIndex !== -1) {
-                    // Check if this is an income section by looking at the grouping
+            for (const unionId of Object.keys(reportData.sections)) {
+                const section = reportData.sections[unionId]
+                const row = section.rows.find(r => r.id === rowId)
+                if (row) {
+                    rowName = row.name
+                    currentBudget = row.budget
                     const grouping = reportData.groupings.find(g => g.id === unionId)
-                    isIncomeSection = grouping?.isIncome ?? false
-
-                    // Create new reference for section to trigger re-render
-                    const newSection = {
-                        ...section,
-                        rows: [...section.rows]
-                    }
-
-                    const oldRow = newSection.rows[rowIndex]
-                    const diff = val - oldRow.budget
-
-                    // Update Row
-                    newSection.rows[rowIndex] = {
-                        ...oldRow,
-                        budget: val
-                    }
-
-                    // Update Section Total
-                    newSection.totalBudget += diff
-
-                    // Update overall budget totals
-                    if (isIncomeSection) {
-                        newBudgetTotals.income += diff
-                    } else {
-                        newBudgetTotals.expenses += diff
-                    }
-
-                    newSections[unionId] = newSection
-                    found = true
+                    rowType = grouping?.id || 'monthly'
                     break
                 }
             }
 
-            if (found) {
-                newReportData.sections = newSections
-                newReportData.budgetTotals = newBudgetTotals
-                setReportData(newReportData)
+            if (!rowName) return
+
+            // Skip if value hasn't changed
+            if (val === currentBudget) return
+
+            // 2. Check if budget document exists in Firestore
+            const budgetDocRef = doc(db, 'budgets', rowId)
+            const budgetDoc = await getDoc(budgetDocRef)
+
+            if (budgetDoc.exists()) {
+                // Update existing budget document
+                await updateDoc(budgetDocRef, { amount: val })
+            } else {
+                // Budget document doesn't exist - create a new one
+                await addDoc(collection(db, 'budgets'), {
+                    name: rowName,
+                    amount: val,
+                    type: rowType,
+                    userId: currentUser.uid
+                })
             }
 
-            // 2. Persist to Firestore (Background)
-            await updateDoc(doc(db, 'budgets', rowId), {
-                amount: val
-            })
+            // 3. Force full reload by incrementing refresh key
+            // This triggers useEffect which calls generateReport with fresh Firestore data
+            setRefreshKey(prev => prev + 1)
 
-            // No need to reload everything
-        } catch (e) {
+        } catch (e: any) {
             console.error("Error updating budget", e)
-            alert("Failed to update budget. Please refresh.")
-            generateReport() // Revert state on error
+            alert(`Failed to update budget: ${e.message || 'Unknown error'}. Please refresh.`)
         }
     }
 
@@ -898,39 +967,41 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                                             <tr key={row.id}>
                                                 <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem' }}>{row.name}</td>
                                                 <td className="sticky-col second-col num-col budget-cell">
-                                                    <input
-                                                        key={`budget-${row.id}-${row.budget}`}
-                                                        type="text"
-                                                        defaultValue={row.budget === 0 ? '' : Math.round(row.budget).toLocaleString('en-ZA').replace(/,/g, ' ')}
-                                                        className="budget-input"
-                                                        placeholder="0"
-                                                        onKeyDown={(e) => {
-                                                            if (e.key === 'Enter') {
-                                                                const cleanVal = e.currentTarget.value.replace(/\s/g, '').replace(/,/g, '')
-                                                                handleBudgetUpdate(row.id, cleanVal)
-                                                                e.currentTarget.blur()
-                                                            }
-                                                        }}
-                                                        onBlur={(e) => {
-                                                            const cleanVal = e.target.value.replace(/\s/g, '').replace(/,/g, '')
-                                                            handleBudgetUpdate(row.id, cleanVal)
-                                                        }}
+                                                    <BudgetInput
+                                                        key={`${row.id}-${row.budget}-${refreshKey}`}
+                                                        value={row.budget}
+                                                        onSave={(cleanVal) => handleBudgetUpdate(row.id, cleanVal)}
                                                     />
                                                 </td>
-                                                <td className="sticky-col third-col num-col" style={{ color: '#666', fontSize: '0.9em' }}>
+                                                <td
+                                                    className="sticky-col third-col num-col"
+                                                    style={{
+                                                        fontSize: '0.9em',
+                                                        color: (!isIncome && row.budget > 0 && avg > row.budget) ? '#c62828' : '#666',
+                                                        backgroundColor: (!isIncome && row.budget > 0 && avg > row.budget) ? '#ffebee' : undefined
+                                                    }}
+                                                >
                                                     {fmt(avg)}
                                                 </td>
-                                                {monthKeys.map(k => (
-                                                    <td
-                                                        key={k}
-                                                        className={`num-col ${!isIncome && row.months[k].amount > row.budget ? 'over-budget-text' : ''}`}
-                                                        onClick={() => handleCellClick(`${row.name} - ${monthLabels[monthKeys.indexOf(k)]}`, row.months[k])}
-                                                        style={{ cursor: 'pointer' }}
-                                                        title="Click to view details"
-                                                    >
-                                                        {fmt(Math.abs(row.months[k].amount))}
-                                                    </td>
-                                                ))}
+                                                {monthKeys.map(k => {
+                                                    const cellAmount = Math.abs(row.months[k].amount)
+                                                    const isOverBudget = !isIncome && row.budget > 0 && cellAmount > row.budget
+                                                    return (
+                                                        <td
+                                                            key={k}
+                                                            className="num-col"
+                                                            onClick={() => handleCellClick(`${row.name} - ${monthLabels[monthKeys.indexOf(k)]}`, row.months[k])}
+                                                            style={{
+                                                                cursor: 'pointer',
+                                                                backgroundColor: isOverBudget ? '#ffebee' : undefined,
+                                                                color: isOverBudget ? '#c62828' : undefined
+                                                            }}
+                                                            title={isOverBudget ? `Over budget by ${fmt(cellAmount - row.budget)}` : 'Click to view details'}
+                                                        >
+                                                            {fmt(cellAmount)}
+                                                        </td>
+                                                    )
+                                                })}
                                             </tr>
                                         )
                                     })}

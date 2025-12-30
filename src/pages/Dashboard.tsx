@@ -81,13 +81,25 @@ export default function Dashboard() {
             <label>Month Start Day (e.g., 25 for salary date):</label>
             <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
               <input
-                type="number"
-                min="1"
-                max="31"
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
                 value={monthStartDay}
-                onChange={(e) => setMonthStartDay(parseInt(e.target.value) || 1)}
+                onChange={(e) => {
+                  const val = e.target.value.replace(/\D/g, '')
+                  if (val === '') {
+                    setMonthStartDay(1)
+                  } else {
+                    const num = parseInt(val, 10)
+                    if (num >= 1 && num <= 31) {
+                      setMonthStartDay(num)
+                    } else if (num > 31) {
+                      setMonthStartDay(31)
+                    }
+                  }
+                }}
                 className="form-input"
-                style={{ width: '80px' }}
+                style={{ width: '80px', textAlign: 'center' }}
               />
               <button onClick={handleSaveStartDay} className="btn-primary btn-sm">Save</button>
             </div>
