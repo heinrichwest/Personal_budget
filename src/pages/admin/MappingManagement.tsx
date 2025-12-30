@@ -253,7 +253,8 @@ export default function MappingManagement() {
         const t = docSnap.data()
         const tDesc = (t.originalDescription || t.description || '').trim().toLowerCase()
 
-        if (tDesc === targetDescClean) {
+        // Match using includes (partial match) - same logic as Transactions.tsx line 620
+        if (tDesc === targetDescClean || tDesc.includes(targetDescClean)) {
           if (winner) {
             let finalCatId = winner.categoryId
             let finalCatName = winner.categoryName
@@ -302,13 +303,28 @@ export default function MappingManagement() {
 
       const now = new Date()
 
-      let newCatName = undefined
+      // Resolve category - handle NEW: prefix by creating the budget first
+      let finalCategoryId: string | null = editCatId || null
+      let finalCategoryName: string | undefined = undefined
+
       if (editCatId) {
-        const cat = allCategories.find(c => c.id === editCatId)
-        if (cat) {
-          newCatName = cat.name
-        } else if (editCatId.startsWith('NEW:')) {
-          newCatName = editCatId.substring(4)
+        if (editCatId.startsWith('NEW:')) {
+          // Create a new budget for this category
+          const newName = editCatId.substring(4)
+          const docRef = await addDoc(collection(db, 'budgets'), {
+            name: newName,
+            amount: 0,
+            userId: currentUser.uid,
+            createdAt: now
+          })
+          finalCategoryId = docRef.id
+          finalCategoryName = newName
+        } else {
+          // Find existing category
+          const cat = allCategories.find(c => c.id === editCatId)
+          if (cat) {
+            finalCategoryName = cat.name
+          }
         }
       }
 
@@ -316,21 +332,40 @@ export default function MappingManagement() {
       let historyOwnerId = currentUser.uid
 
       if (mappingToUpdate.userId === 'SYSTEM' && !isAdmin) {
-        // Create Personal Override
-        await addDoc(collection(db, 'transactionMappings'), {
-          originalDescription: mappingToUpdate.originalDescription,
-          mappedDescription: editMapDesc,
-          categoryId: editCatId || null,
-          categoryName: newCatName,
-          userId: currentUser.uid,
-          createdAt: now,
-          updatedAt: now
-        })
+        // Check if personal override already exists for this description
+        const existingOverrideQuery = query(
+          collection(db, 'transactionMappings'),
+          where('originalDescription', '==', mappingToUpdate.originalDescription),
+          where('userId', '==', currentUser.uid)
+        )
+        const existingOverrideSnap = await getDocs(existingOverrideQuery)
+
+        if (!existingOverrideSnap.empty) {
+          // Update existing personal override
+          const existingRef = existingOverrideSnap.docs[0].ref
+          await updateDoc(existingRef, {
+            mappedDescription: editMapDesc,
+            categoryId: finalCategoryId,
+            categoryName: finalCategoryName,
+            updatedAt: now
+          })
+        } else {
+          // Create new Personal Override
+          await addDoc(collection(db, 'transactionMappings'), {
+            originalDescription: mappingToUpdate.originalDescription,
+            mappedDescription: editMapDesc,
+            categoryId: finalCategoryId,
+            categoryName: finalCategoryName,
+            userId: currentUser.uid,
+            createdAt: now,
+            updatedAt: now
+          })
+        }
 
         shouldUpdateHistory = true
         historyOwnerId = currentUser.uid
 
-        alert("Personal override created! Updating your historical transactions...")
+        alert("Personal override saved! Updating your historical transactions...")
 
       } else {
         // Update Existing
@@ -338,7 +373,8 @@ export default function MappingManagement() {
 
         await updateDoc(ref, {
           mappedDescription: editMapDesc,
-          categoryId: editCatId || null,
+          categoryId: finalCategoryId,
+          categoryName: finalCategoryName || null,
           updatedAt: now
         })
 
@@ -524,77 +560,6 @@ export default function MappingManagement() {
           </div>
         )}
       </div>
-
-      {(isAdmin || currentUser?.email === 'hein@speccon.co.za') && (
-        <div style={{ marginTop: '1rem', marginBottom: '1rem', padding: '1rem', border: '1px dashed #ccc', borderRadius: '4px', backgroundColor: '#fafafa' }}>
-          <strong>Debug Actions:</strong>
-          <button
-            onClick={async () => {
-              try {
-                const now = new Date()
-                const desc = "MES"
-
-                // Lookup Category ID: Prefer "House Expenses", fallback to "House Taxes"
-                let targetCat = allCategories.find(c => c.name.trim().toLowerCase() === 'house expenses')
-                if (!targetCat) {
-                  targetCat = allCategories.find(c => c.name.trim().toLowerCase() === 'house taxes')
-                }
-
-                const targetCatId = targetCat ? targetCat.id : null
-                const targetCatName = targetCat ? targetCat.name : "House Expenses"
-
-                if (!targetCatId) {
-                  if (!confirm(`Warning: '${targetCatName}' category not found in budgets. Create mapping without category linking?`)) return
-                }
-
-                // Check for existing System Rule to update instead of creating duplicate
-                const q = query(
-                  collection(db, 'transactionMappings'),
-                  where('userId', '==', 'SYSTEM'),
-                  where('originalDescription', '==', desc)
-                )
-                const snap = await getDocs(q)
-
-                if (!snap.empty) {
-                  const docRef = snap.docs[0].ref
-                  await updateDoc(docRef, {
-                    mappedDescription: "Mes_h",
-                    categoryId: targetCatId,
-                    categoryName: targetCatName,
-                    updatedAt: now
-                  })
-                  alert(`Updated existing 'MES' System Rule to link '${targetCatName}' category.`)
-                } else {
-                  await addDoc(collection(db, 'transactionMappings'), {
-                    originalDescription: desc,
-                    mappedDescription: "Mes_h",
-                    categoryId: targetCatId,
-                    categoryName: targetCatName,
-                    userId: "SYSTEM",
-                    createdAt: now,
-                    updatedAt: now
-                  })
-                  alert(`Created 'MES' System Rule linked to '${targetCatName}'.`)
-                }
-
-                // Force update history for current user
-                if (currentUser) {
-                  await reapplyRuleToHistory(desc, currentUser.uid)
-                }
-
-                loadMappings()
-              } catch (e) { console.error(e); alert("Failed to restore rule") }
-            }}
-            style={{ marginLeft: '1rem' }}
-            className="btn-outline btn-sm"
-          >
-            Restore 'MES' Rule
-          </button>
-          <span style={{ fontSize: '0.8rem', color: '#666', marginLeft: '1rem' }}>
-            (Use to restore 'MES' if accidentally deleted)
-          </span>
-        </div>
-      )}
 
       {/* Specific Adoption Banner */}
       {isAdmin && mappings.some(m => m.userEmail === 'hein@speccon.co.za') && (

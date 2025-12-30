@@ -238,6 +238,170 @@ export default function Transactions() {
   }
 
   const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [isUpdatingMappings, setIsUpdatingMappings] = useState(false)
+
+  // Re-apply all mapping rules to all transactions
+  async function updateAllMappings() {
+    if (!currentUser) return
+
+    setIsUpdatingMappings(true)
+
+    try {
+      // Load all mappings
+      const mappingSnapshot = await getDocs(collection(db, 'transactionMappings'))
+
+      const systemMappingsMap = new Map<string, { rule: string; mappedDescription: string; categoryId: string; categoryName?: string }>()
+      const userMappingsMap = new Map<string, { rule: string; mappedDescription: string; categoryId: string; categoryName?: string }>()
+
+      // Build a map of categoryId -> categoryName from all budgets for resolution
+      const budgetSnapshot = await getDocs(collection(db, 'budgets'))
+      const budgetCategoryMap = new Map<string, string>()
+      budgetSnapshot.forEach(docSnap => {
+        const data = docSnap.data()
+        if (data.name) {
+          budgetCategoryMap.set(docSnap.id, data.name)
+        }
+      })
+
+      mappingSnapshot.forEach(docSnap => {
+        const data = docSnap.data()
+        if (data.originalDescription) {
+          const rule = normalizeMatchText(data.originalDescription)
+
+          // Resolve categoryName from categoryId if not already set
+          let categoryName = data.categoryName
+          if (!categoryName && data.categoryId) {
+            categoryName = budgetCategoryMap.get(data.categoryId)
+          }
+
+          const mappingObj = {
+            rule: rule,
+            mappedDescription: data.mappedDescription,
+            categoryId: data.categoryId,
+            categoryName: categoryName
+          }
+
+          if (!data.userId || data.userId === 'SYSTEM') {
+            systemMappingsMap.set(rule, mappingObj)
+          } else if (data.userId === currentUser.uid) {
+            userMappingsMap.set(rule, mappingObj)
+          }
+        }
+      })
+
+      // Merge: User overrides System
+      const mergedMap = new Map(systemMappingsMap)
+      userMappingsMap.forEach((val, key) => mergedMap.set(key, val))
+
+      const mappings = Array.from(mergedMap.values())
+      // Sort by rule length (longest first) for better matching
+      mappings.sort((a, b) => b.rule.length - a.rule.length)
+
+      // Update all transactions
+      let batch = writeBatch(db)
+      let batchCount = 0
+      let updatedCount = 0
+
+      for (const transaction of transactions) {
+        if (!transaction.id) continue
+
+        const normalizedDesc = normalizeMatchText(transaction.description)
+
+        // Find matching rule (exact match first, then includes)
+        let match = mappings.find(m => normalizedDesc === m.rule) || mappings.find(m => normalizedDesc.includes(m.rule))
+
+        if (match) {
+          // Resolve category: find user's budget by name to get correct categoryId
+          let finalCategoryId: string | null = match.categoryId
+          let finalCategoryName = match.categoryName
+
+          // Handle "NEW:CategoryName" format - extract the name and look it up or create it
+          if (finalCategoryId && finalCategoryId.startsWith('NEW:')) {
+            const catNameFromId = finalCategoryId.substring(4) // Remove "NEW:" prefix
+            const userCat = categories.find(c => c.name.toLowerCase().trim() === catNameFromId.toLowerCase().trim())
+            if (userCat) {
+              finalCategoryId = userCat.id
+              finalCategoryName = userCat.name
+            } else {
+              // Category doesn't exist - create it
+              const docRef = await addDoc(collection(db, 'budgets'), {
+                name: catNameFromId,
+                amount: 0,
+                userId: currentUser.uid,
+                createdAt: new Date()
+              })
+              finalCategoryId = docRef.id
+              finalCategoryName = catNameFromId
+              // Add to local categories array so subsequent transactions can find it
+              categories.push({ id: docRef.id, name: catNameFromId })
+            }
+          }
+          // If we have a categoryName, find the user's budget with that name
+          else if (finalCategoryName) {
+            const userCat = categories.find(c => c.name.toLowerCase().trim() === finalCategoryName!.toLowerCase().trim())
+            if (userCat) {
+              finalCategoryId = userCat.id
+              finalCategoryName = userCat.name
+            }
+          } else if (finalCategoryId) {
+            // Try to find category by ID directly
+            const cat = categories.find(c => c.id === finalCategoryId)
+            if (cat) {
+              finalCategoryName = cat.name
+            } else {
+              // categoryId doesn't exist in user's budgets, try to resolve via budgetCategoryMap
+              const catName = budgetCategoryMap.get(finalCategoryId)
+              if (catName) {
+                // Find user's category with same name
+                const userCat = categories.find(c => c.name.toLowerCase().trim() === catName.toLowerCase().trim())
+                if (userCat) {
+                  finalCategoryId = userCat.id
+                  finalCategoryName = userCat.name
+                } else {
+                  finalCategoryName = catName
+                }
+              }
+            }
+          }
+
+          batch.update(doc(db, 'transactions', transaction.id), {
+            mappedDescription: match.mappedDescription,
+            categoryId: finalCategoryId || null,
+            categoryName: finalCategoryName || null
+          })
+
+          batchCount++
+          updatedCount++
+
+          // Firestore batches are limited to 500 operations
+          if (batchCount >= 450) {
+            await batch.commit()
+            batch = writeBatch(db) // Create new batch after commit
+            batchCount = 0
+          }
+        }
+      }
+
+      // Commit remaining batch
+      if (batchCount > 0) {
+        await batch.commit()
+      }
+
+      // Small delay to let Firestore settle before reloading
+      await new Promise(resolve => setTimeout(resolve, 500))
+
+      // Reload transactions
+      await loadTransactions()
+
+      alert(`Updated ${updatedCount} transactions with mapping rules.`)
+
+    } catch (error) {
+      console.error('Error updating mappings:', error)
+      alert('Failed to update mappings. See console for details.')
+    } finally {
+      setIsUpdatingMappings(false)
+    }
+  }
 
   async function analyzeWithAI() {
     const unmapped = transactions.filter(t => !t.categoryId && !t.suggestedCategory)
@@ -1229,7 +1393,15 @@ export default function Transactions() {
             <h3 style={{ margin: 0, fontSize: '0.9rem', color: '#666' }}>Unmapped Transactions</h3>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '0.5rem' }}>
               <span style={{ fontSize: '1.8rem', fontWeight: 'bold', color: '#d32f2f' }}>{unmappedCount}</span>
-              <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <button
+                  onClick={updateAllMappings}
+                  className={`btn-sm btn-primary`}
+                  disabled={isUpdatingMappings || transactions.length === 0}
+                  style={{ fontSize: '0.8rem', backgroundColor: '#2196f3' }}
+                >
+                  {isUpdatingMappings ? 'Updating...' : 'Update Mappings'}
+                </button>
                 <button
                   onClick={analyzeWithAI}
                   className={`btn-sm btn-primary`}
