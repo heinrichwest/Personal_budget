@@ -28,6 +28,9 @@ export default function Layout() {
               </>
             )}
             <Link to="/mappings">Mappings</Link>
+            {isSystemAdmin && (
+              <Link to="/tables">Tables</Link>
+            )}
             {isAdmin && (
               <Link to="/admin">Admin</Link>
             )}

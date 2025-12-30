@@ -9,6 +9,7 @@ import AdminDashboard from './pages/admin/AdminDashboard'
 import UserManagement from './pages/admin/UserManagement'
 import SystemConfig from './pages/admin/SystemConfig'
 import MappingManagement from './pages/admin/MappingManagement'
+import Tables from './pages/admin/Tables'
 import Layout from './components/Layout'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -41,7 +42,7 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
 
 function NavigateToHome() {
   const { isSystemAdmin } = useAuth()
-  return <Navigate to={isSystemAdmin ? "/admin" : "/dashboard"} replace />
+  return <Navigate to={isSystemAdmin ? "/mappings" : "/dashboard"} replace />
 }
 
 function AppRoutes() {
@@ -94,6 +95,7 @@ function AppRoutes() {
           }
         />
         <Route path="mappings" element={<MappingManagement />} />
+        <Route path="tables" element={<Tables />} />
       </Route>
     </Routes>
   )

@@ -235,7 +235,7 @@ export default function MappingManagement() {
 
       const winner = candidates.length > 0 ? candidates[0] : undefined
 
-      const batch = writeBatch(db)
+      let batch = writeBatch(db)
       let batchCount = 0
 
       // Get transactions to update
@@ -247,25 +247,75 @@ export default function MappingManagement() {
       const transSnap = await getDocs(transQ)
       const targetDescClean = originalDesc.trim().toLowerCase()
 
-      const validUserCategories = allCategories.filter(c => c.userId === targetUserId || c.userId === 'SYSTEM')
+      // Get user's categories for resolution
+      const userCategoriesSnap = await getDocs(query(collection(db, 'budgets'), where('userId', '==', targetUserId)))
+      const userCategories: Array<{id: string, name: string}> = []
+      userCategoriesSnap.forEach(doc => {
+        const data = doc.data()
+        if (data.name) {
+          userCategories.push({ id: doc.id, name: data.name })
+        }
+      })
 
-      transSnap.docs.forEach(docSnap => {
+      // Also load all budgets for resolving system category IDs to names
+      const allBudgetsSnap = await getDocs(collection(db, 'budgets'))
+      const budgetIdToName = new Map<string, string>()
+      allBudgetsSnap.forEach(doc => {
+        const data = doc.data()
+        if (data.name) {
+          budgetIdToName.set(doc.id, data.name)
+        }
+      })
+
+      for (const docSnap of transSnap.docs) {
         const t = docSnap.data()
         const tDesc = (t.originalDescription || t.description || '').trim().toLowerCase()
 
-        // Match using includes (partial match) - same logic as Transactions.tsx line 620
+        // Match using includes (partial match) - same logic as Transactions.tsx
         if (tDesc === targetDescClean || tDesc.includes(targetDescClean)) {
           if (winner) {
-            let finalCatId = winner.categoryId
-            let finalCatName = winner.categoryName
+            let finalCatId: string | null = winner.categoryId || null
+            let finalCatName: string | undefined = winner.categoryName
 
-            // GLOBAL RESOLUTION:
-            // Prefer resolving Category Name to the User's specific Budget ID.
-            if (winner.categoryName && validUserCategories.length > 0) {
-              const match = validUserCategories.find(c => c.name.trim().toLowerCase() === winner.categoryName!.trim().toLowerCase())
-              if (match) {
-                finalCatId = match.id
-                finalCatName = match.name
+            // Handle NEW: prefix - extract name and look up or create category
+            if (finalCatId && finalCatId.startsWith('NEW:')) {
+              const catNameFromId = finalCatId.substring(4)
+              const userCat = userCategories.find(c => c.name.toLowerCase().trim() === catNameFromId.toLowerCase().trim())
+              if (userCat) {
+                finalCatId = userCat.id
+                finalCatName = userCat.name
+              } else {
+                // Create the category
+                const docRef = await addDoc(collection(db, 'budgets'), {
+                  name: catNameFromId,
+                  amount: 0,
+                  userId: targetUserId,
+                  createdAt: new Date()
+                })
+                finalCatId = docRef.id
+                finalCatName = catNameFromId
+                userCategories.push({ id: docRef.id, name: catNameFromId })
+              }
+            }
+            // Resolve categoryName to user's budget
+            else if (finalCatName) {
+              const userCat = userCategories.find(c => c.name.toLowerCase().trim() === finalCatName!.toLowerCase().trim())
+              if (userCat) {
+                finalCatId = userCat.id
+                finalCatName = userCat.name
+              }
+            }
+            // Resolve categoryId to name, then find user's category
+            else if (finalCatId) {
+              const catName = budgetIdToName.get(finalCatId)
+              if (catName) {
+                const userCat = userCategories.find(c => c.name.toLowerCase().trim() === catName.toLowerCase().trim())
+                if (userCat) {
+                  finalCatId = userCat.id
+                  finalCatName = userCat.name
+                } else {
+                  finalCatName = catName
+                }
               }
             }
 
@@ -283,8 +333,15 @@ export default function MappingManagement() {
             })
           }
           batchCount++
+
+          // Commit in batches of 450 to avoid Firestore limits
+          if (batchCount >= 450) {
+            await batch.commit()
+            batch = writeBatch(db)
+            batchCount = 0
+          }
         }
-      })
+      }
 
       if (batchCount > 0) {
         await batch.commit()
