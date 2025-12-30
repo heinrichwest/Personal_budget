@@ -51,9 +51,10 @@ service cloud.firestore {
     }
     
     // Budgets collection
-    // Query constraints must match these rules
+    // All authenticated users can read budgets (needed to resolve category names from shared mappings)
+    // Write operations are restricted to owners only
     match /budgets/{budgetId} {
-      allow read: if isAuthenticated() && isOwner(resource.data.userId);
+      allow read: if isAuthenticated();
       allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
       allow update: if isAuthenticated() && isOwner(resource.data.userId);
       allow delete: if isAuthenticated() && isOwner(resource.data.userId);
@@ -77,13 +78,11 @@ service cloud.firestore {
     
     // Transaction mappings collection
     match /transactionMappings/{mappingId} {
-      // Users can read System mappings (no userId) OR their own mappings
-      allow read: if isAuthenticated() && (
-          !('userId' in resource.data) || resource.data.userId == null || resource.data.userId == 'SYSTEM' || resource.data.userId == request.auth.uid || isAdmin()
-      );
+      // All authenticated users can read all mappings (mappings are shared as system defaults)
+      allow read: if isAuthenticated();
       // Create: User can create for themselves. Admin can create for system (no userId) or anyone.
       allow create: if isAuthenticated() && (
-          request.resource.data.userId == request.auth.uid || 
+          request.resource.data.userId == request.auth.uid ||
           isAdmin()
       );
       // Update/Delete: Owners or Admins.

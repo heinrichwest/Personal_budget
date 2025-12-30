@@ -22,6 +22,7 @@ interface Transaction {
     categoryName?: string
     mappedDescription?: string
     userId: string
+    reportingMonth?: string // Format: "YYYY-MM" - used for filtering/grouping
 }
 
 interface CellData {
@@ -451,8 +452,14 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
 
                 const catId = txn.categoryId
 
-                const info = getFiscalMonthInfo(date, monthStartDay)
-                const key = info.key
+                // Use reportingMonth if available, otherwise calculate from date
+                let key: string
+                if (txn.reportingMonth) {
+                    key = txn.reportingMonth
+                } else {
+                    const info = getFiscalMonthInfo(date, monthStartDay)
+                    key = info.key
+                }
 
                 // Update transaction date object for usage in UI
                 txn.date = date
@@ -701,12 +708,13 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
         if (!editingTxn) return
 
         try {
-            // Simple update of description and category
+            // Simple update of description, category, and reporting month
             await updateDoc(doc(db, 'transactions', editingTxn.id), {
                 description: editingTxn.description, // User might not have changed this if using mappedDesc
                 mappedDescription: editingTxn.mappedDescription,
                 categoryId: editingTxn.categoryId,
-                categoryName: editingTxn.categoryName
+                categoryName: editingTxn.categoryName,
+                reportingMonth: editingTxn.reportingMonth
             })
 
             // Close modals and reload
@@ -1124,6 +1132,18 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                                     <option value="">Unmapped</option>
                                     {allBudgets.map(b => (
                                         <option key={b.id} value={b.id}>{b.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div style={{ marginBottom: '15px' }}>
+                                <label style={{ display: 'block', marginBottom: '5px', fontSize: '0.9rem', color: '#666' }}>Reporting Month</label>
+                                <select
+                                    value={editingTxn.reportingMonth || (editingTxn.date ? (typeof editingTxn.date.toDate === 'function' ? editingTxn.date.toDate() : new Date(editingTxn.date)).toISOString().substring(0, 7) : '')}
+                                    onChange={e => setEditingTxn({ ...editingTxn, reportingMonth: e.target.value })}
+                                    style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #ddd' }}
+                                >
+                                    {reportData?.monthKeys.map(month => (
+                                        <option key={month} value={month}>{month}</option>
                                     ))}
                                 </select>
                             </div>

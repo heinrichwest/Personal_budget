@@ -39,14 +39,19 @@ export default function MappingManagement() {
   const [searchTerm, setSearchTerm] = useState('')
 
   useEffect(() => {
-    loadMappings()
-    loadAllCategories()
-  }, [])
+    if (currentUser) {
+      // Load categories first, then mappings (mappings may need category data)
+      loadAllCategories().then(() => loadMappings())
+    }
+  }, [currentUser])
 
   async function loadAllCategories() {
+    if (!currentUser) return
+
     try {
-      // 1. Fetch User Budgets
-      const snapshot = await getDocs(collection(db, 'budgets'))
+      // 1. Fetch User Budgets - only fetch current user's budgets to respect Firestore rules
+      const userBudgetsQuery = query(collection(db, 'budgets'), where('userId', '==', currentUser.uid))
+      const snapshot = await getDocs(userBudgetsQuery)
       const cats = snapshot.docs.map(d => ({ id: d.id, name: d.data().name, userId: d.data().userId }))
       cats.sort((a, b) => a.name.localeCompare(b.name))
       setAllCategories(cats)
@@ -77,20 +82,24 @@ export default function MappingManagement() {
         const snapshot = await getDocs(q)
         rawMappings = snapshot.docs.map(d => ({ id: d.id, ...d.data() }))
       } else {
-        // User: Load System (no userId or userId='SYSTEM') AND Personal (userId=uid)
-        const systemQ = query(
-          collection(db, 'transactionMappings'),
-          where('userId', 'in', ['SYSTEM', null])
-        )
-        const personalQ = query(
-          collection(db, 'transactionMappings'),
-          where('userId', '==', currentUser.uid)
-        )
+        // User: Load System (userId='SYSTEM') AND Personal (userId=uid)
+        // Also load all mappings to show as "system" if no explicit SYSTEM mappings exist
+        const allMappingsSnap = await getDocs(collection(db, 'transactionMappings'))
 
-        const [sysSnap, persSnap] = await Promise.all([getDocs(systemQ), getDocs(personalQ)])
+        const allDocs = allMappingsSnap.docs.map(d => ({ id: d.id, ...d.data() }))
 
-        const sysDocs = sysSnap.docs.map(d => ({ id: d.id, ...d.data(), isSystem: true }))
-        const persDocs = persSnap.docs.map(d => ({ id: d.id, ...d.data(), isSystem: false }))
+        // Separate into system, personal, and other user mappings
+        const systemDocs = allDocs.filter((d: any) => d.userId === 'SYSTEM')
+        const personalDocs = allDocs.filter((d: any) => d.userId === currentUser.uid)
+        const otherUserDocs = allDocs.filter((d: any) => d.userId && d.userId !== 'SYSTEM' && d.userId !== currentUser.uid)
+
+
+        // If no SYSTEM mappings exist, treat other user mappings as system defaults
+        // (This allows sharing mappings before they're officially promoted to SYSTEM)
+        const effectiveSystemDocs = systemDocs.length > 0 ? systemDocs : otherUserDocs
+
+        const sysDocs = effectiveSystemDocs.map(d => ({ ...d, isSystem: true }))
+        const persDocs = personalDocs.map(d => ({ ...d, isSystem: false }))
 
         // Track system rules to know if "Revert" is possible. Strict typing for safety.
         // The inferred type of sysDocs items should have `originalDescription`.
@@ -108,25 +117,41 @@ export default function MappingManagement() {
         if (data.categoryId) categoryIds.add(data.categoryId)
       })
 
-      // Fetch metadata (Users/Categories)
+      // Fetch metadata (Users and Categories) in parallel for better performance
       const userMap = new Map<string, string>()
+      const categoryMap = new Map<string, string>()
+
+      // Build promises for parallel execution
+      const fetchPromises: Promise<void>[] = []
+
+      // User fetches (admin only)
       if (isAdmin && userIds.size > 0) {
-        const userPromises = Array.from(userIds).map(id => getDoc(doc(db, 'users', id)))
-        const userSnaps = await Promise.all(userPromises)
-        userSnaps.forEach(snap => {
-          if (snap.exists()) userMap.set(snap.id, snap.data().email)
+        const userFetchPromise = Promise.all(
+          Array.from(userIds).map(id => getDoc(doc(db, 'users', id)))
+        ).then(userSnaps => {
+          userSnaps.forEach(snap => {
+            if (snap.exists()) userMap.set(snap.id, snap.data().email)
+          })
         })
+        fetchPromises.push(userFetchPromise)
       }
 
-      const categoryPromises = Array.from(categoryIds).map(id => getDoc(doc(db, 'budgets', id)))
-      const categorySnaps = await Promise.all(categoryPromises)
+      // Category fetches (parallel) - all authenticated users can now read budgets
+      if (categoryIds.size > 0) {
+        const categoryFetchPromise = Promise.all(
+          Array.from(categoryIds).map(catId => getDoc(doc(db, 'budgets', catId)))
+        ).then(snaps => {
+          snaps.forEach((snap, idx) => {
+            if (snap.exists()) {
+              categoryMap.set(Array.from(categoryIds)[idx], snap.data().name)
+            }
+          })
+        })
+        fetchPromises.push(categoryFetchPromise)
+      }
 
-      const categoryMap = new Map<string, string>()
-      categorySnaps.forEach(snap => {
-        if (snap.exists()) {
-          categoryMap.set(snap.id, snap.data().name)
-        }
-      })
+      // Wait for all fetches to complete in parallel
+      await Promise.all(fetchPromises)
 
       const mappingsList: TransactionMapping[] = rawMappings.map((data: any) => {
         let catName = undefined
@@ -134,7 +159,8 @@ export default function MappingManagement() {
           if (data.categoryId.startsWith('NEW:')) {
             catName = data.categoryId.substring(4)
           } else {
-            catName = categoryMap.get(data.categoryId)
+            // Get from fetched budgets, fall back to stored categoryName
+            catName = categoryMap.get(data.categoryId) || data.categoryName
           }
         }
 
@@ -351,6 +377,39 @@ export default function MappingManagement() {
     }
   }
 
+  // --- SYSTEM-WIDE UPDATE HELPER (Admin only) ---
+  async function reapplySystemRuleToAllUsers(originalDesc: string) {
+    try {
+      // Get all unique user IDs from transactions that match this description
+      const transQuery = query(collection(db, 'transactions'))
+      const transSnap = await getDocs(transQuery)
+
+      const targetDescClean = originalDesc.trim().toLowerCase()
+      const affectedUserIds = new Set<string>()
+
+      transSnap.docs.forEach(docSnap => {
+        const t = docSnap.data()
+        const tDesc = (t.originalDescription || t.description || '').trim().toLowerCase()
+
+        // Check if transaction matches this description
+        if (tDesc === targetDescClean || tDesc.includes(targetDescClean)) {
+          if (t.userId) {
+            affectedUserIds.add(t.userId)
+          }
+        }
+      })
+
+      // For each affected user, re-apply the rule (respecting personal overrides)
+      for (const userId of affectedUserIds) {
+        await reapplyRuleToHistory(originalDesc, userId)
+      }
+
+      console.log(`Updated transactions for ${affectedUserIds.size} users`)
+    } catch (e) {
+      console.error("Error reapplying system rule to all users", e)
+    }
+  }
+
   async function saveEdit(id: string) {
     if (!currentUser) return
 
@@ -438,10 +497,14 @@ export default function MappingManagement() {
         if (mappingToUpdate.userId !== 'SYSTEM') {
           shouldUpdateHistory = true
           historyOwnerId = mappingToUpdate.userId
+        } else if (isAdmin && mappingToUpdate.userId === 'SYSTEM') {
+          // System admin updating a SYSTEM mapping - update ALL users' transactions
+          alert("System mapping updated! Updating all users' historical transactions...")
+          await reapplySystemRuleToAllUsers(mappingToUpdate.originalDescription)
         }
       }
 
-      // Re-apply history
+      // Re-apply history for personal mappings
       if (shouldUpdateHistory) {
         await reapplyRuleToHistory(mappingToUpdate.originalDescription, historyOwnerId)
       }
@@ -717,14 +780,17 @@ export default function MappingManagement() {
                       >
                         <option value="">No Category</option>
                         {(() => {
-                          const rawUserCats = allCategories.filter(cat => cat.userId === mapping.userId || cat.userId === currentUser?.uid)
+                          // For non-admin users, allCategories already contains only their own categories
+                          // For admins, we filter to the current user's categories for the dropdown
+                          const userCats = allCategories.filter(cat => cat.userId === currentUser?.uid)
 
-                          const userCats = Array.from(new Map(rawUserCats.map(item => [item.name.trim(), item])).values())
-                          const combined = [...userCats]
+                          // Deduplicate by name
+                          const dedupedCats = Array.from(new Map(userCats.map(item => [item.name.trim().toLowerCase(), item])).values())
+                          const combined = [...dedupedCats]
 
-                          // Add current default suggestion if not in list
+                          // Add system default categories that the user doesn't have yet
                           if (systemDefaults.length > 0) {
-                            const userCatNames = new Set(userCats.map(c => c.name.toLowerCase().trim()))
+                            const userCatNames = new Set(dedupedCats.map(c => c.name.toLowerCase().trim()))
                             const additionalDefaults = systemDefaults
                               .filter(name => !userCatNames.has(name.toLowerCase().trim()))
                               .map(name => ({
@@ -739,7 +805,7 @@ export default function MappingManagement() {
 
                           return combined.map(cat => (
                             <option key={cat.id} value={cat.id}>
-                              {cat.name} {cat.userId === 'SYSTEM' ? '(New)' : ''}
+                              {cat.name} {cat.id.startsWith('NEW:') && userCats.length > 0 ? '(New)' : ''}
                             </option>
                           ))
                         })()}

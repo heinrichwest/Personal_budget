@@ -10,6 +10,7 @@ import UserManagement from './pages/admin/UserManagement'
 import SystemConfig from './pages/admin/SystemConfig'
 import MappingManagement from './pages/admin/MappingManagement'
 import Tables from './pages/admin/Tables'
+import HowItWorks from './pages/HowItWorks'
 import Layout from './components/Layout'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -96,6 +97,7 @@ function AppRoutes() {
         />
         <Route path="mappings" element={<MappingManagement />} />
         <Route path="tables" element={<Tables />} />
+        <Route path="how-it-works" element={<HowItWorks />} />
       </Route>
     </Routes>
   )

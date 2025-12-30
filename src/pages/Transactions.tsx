@@ -16,6 +16,7 @@ interface Transaction {
   mappedDescription?: string
   userId: string
   bankStatementId?: string
+  reportingMonth?: string // Format: "YYYY-MM"
   // AI Suggestions
   suggestedCategory?: string
   suggestedCategoryName?: string
@@ -126,6 +127,19 @@ export default function Transactions() {
     opening: string // User input string
     closing: string // User input string
   }>({ opening: '', closing: '' })
+
+  // Reporting Month editing state
+  const [editingReportingMonth, setEditingReportingMonth] = useState<string | null>(null)
+
+  // Get unique reporting months from transactions for dropdown
+  const availableReportingMonths = React.useMemo(() => {
+    const months = new Set<string>()
+    transactions.forEach(t => {
+      const month = t.reportingMonth || format(t.date, 'yyyy-MM')
+      months.add(month)
+    })
+    return Array.from(months).sort().reverse()
+  }, [transactions])
 
   useEffect(() => {
     if (!currentUser) return
@@ -563,8 +577,21 @@ export default function Transactions() {
     }
   }
 
-
-
+  async function updateReportingMonth(transactionId: string, newMonth: string) {
+    try {
+      await updateDoc(doc(db, 'transactions', transactionId), {
+        reportingMonth: newMonth
+      })
+      // Update local state
+      setTransactions(prev => prev.map(t =>
+        t.id === transactionId ? { ...t, reportingMonth: newMonth } : t
+      ))
+      setEditingReportingMonth(null)
+    } catch (e) {
+      console.error("Error updating reporting month", e)
+      alert("Failed to update reporting month")
+    }
+  }
 
 
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
@@ -798,6 +825,9 @@ export default function Transactions() {
           }
         }
 
+        // Set reportingMonth from transaction date (format: "YYYY-MM")
+        const reportingMonth = format(date, 'yyyy-MM')
+
         transactionsToAdd.push({
           date,
           description: descStr,
@@ -806,7 +836,8 @@ export default function Transactions() {
           userId: currentUser.uid,
           bankStatementId: statementRef.id,
           categoryId: categoryId || null,
-          categoryName: categoryName || null
+          categoryName: categoryName || null,
+          reportingMonth
         })
       }
 
@@ -1395,14 +1426,6 @@ export default function Transactions() {
               <span style={{ fontSize: '1.8rem', fontWeight: 'bold', color: '#d32f2f' }}>{unmappedCount}</span>
               <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                 <button
-                  onClick={updateAllMappings}
-                  className={`btn-sm btn-primary`}
-                  disabled={isUpdatingMappings || transactions.length === 0}
-                  style={{ fontSize: '0.8rem', backgroundColor: '#2196f3' }}
-                >
-                  {isUpdatingMappings ? 'Updating...' : 'Update Mappings'}
-                </button>
-                <button
                   onClick={analyzeWithAI}
                   className={`btn-sm btn-primary`}
                   disabled={isAnalyzing || unmappedCount === 0}
@@ -1476,6 +1499,9 @@ export default function Transactions() {
                   <th onClick={() => handleSort('amount')} style={{ cursor: 'pointer' }}>
                     Amount {sortConfig?.field === 'amount' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
                   </th>
+                  <th onClick={() => handleSort('reportingMonth')} style={{ cursor: 'pointer' }}>
+                    Reporting Month {sortConfig?.field === 'reportingMonth' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
+                  </th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -1516,6 +1542,29 @@ export default function Transactions() {
                     </td>
                     <td className={transaction.amount < 0 ? 'negative' : 'positive'}>
                       R {Math.abs(transaction.amount).toFixed(2)}
+                    </td>
+                    <td>
+                      {editingReportingMonth === transaction.id ? (
+                        <select
+                          value={transaction.reportingMonth || format(transaction.date, 'yyyy-MM')}
+                          onChange={(e) => updateReportingMonth(transaction.id!, e.target.value)}
+                          onBlur={() => setEditingReportingMonth(null)}
+                          autoFocus
+                          style={{ padding: '4px 8px', fontSize: '0.9rem', borderRadius: '4px', border: '1px solid #ddd' }}
+                        >
+                          {availableReportingMonths.map(month => (
+                            <option key={month} value={month}>{month}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span
+                          onClick={() => setEditingReportingMonth(transaction.id!)}
+                          style={{ cursor: 'pointer', padding: '4px 8px', borderRadius: '4px', backgroundColor: '#f5f5f5' }}
+                          title="Click to edit"
+                        >
+                          {transaction.reportingMonth || format(transaction.date, 'yyyy-MM')}
+                        </span>
+                      )}
                     </td>
                     <td>
                       <button

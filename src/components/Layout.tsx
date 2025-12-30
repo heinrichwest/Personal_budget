@@ -34,6 +34,7 @@ export default function Layout() {
             {isAdmin && (
               <Link to="/admin">Admin</Link>
             )}
+            <Link to="/how-it-works">How It Works</Link>
           </div>
           <div className="nav-user">
             <span className="user-email">{currentUser?.email}</span>

@@ -91,16 +91,32 @@ export default function Tables() {
 
       snapshot.forEach(doc => {
         const docData = doc.data()
-        docs.push({ id: doc.id, ...docData })
+        const docWithId = { id: doc.id, ...docData }
+
+        // Add resolved userName if userId exists
+        if (docData.userId && docData.userId !== 'SYSTEM') {
+          docWithId._userName = userMap[docData.userId] || docData.userId
+        } else if (docData.userId === 'SYSTEM') {
+          docWithId._userName = 'SYSTEM'
+        }
+
+        docs.push(docWithId)
 
         // Collect all keys for columns
         Object.keys(docData).forEach(key => allKeys.add(key))
       })
 
-      // Sort columns: id first, then alphabetically
+      // Add _userName to columns if any document has userId
+      if (docs.some(d => d.userId)) {
+        allKeys.add('_userName')
+      }
+
+      // Sort columns: id first, _userName second, then alphabetically
       const sortedColumns = Array.from(allKeys).sort((a, b) => {
         if (a === 'id') return -1
         if (b === 'id') return 1
+        if (a === '_userName') return -1
+        if (b === '_userName') return 1
         return a.localeCompare(b)
       })
 
@@ -161,7 +177,7 @@ export default function Tables() {
   }
 
   return (
-    <div className="container" style={{ padding: '2rem', maxWidth: '100%' }}>
+    <div style={{ padding: '2rem', maxWidth: '100%', width: '100%', boxSizing: 'border-box' }}>
       <h1 style={{ marginBottom: '1.5rem', color: '#12265e' }}>Firebase Collections</h1>
 
       {/* Collection Selector */}
@@ -199,8 +215,7 @@ export default function Tables() {
         <div style={{
           backgroundColor: 'white',
           borderRadius: '8px',
-          boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-          overflow: 'hidden'
+          boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
         }}>
           <div style={{
             padding: '1rem',
@@ -237,7 +252,7 @@ export default function Tables() {
               >
                 <option value="all">All Columns</option>
                 {columns.map(col => (
-                  <option key={col} value={col}>{col}</option>
+                  <option key={col} value={col}>{col === '_userName' ? 'User Name' : col}</option>
                 ))}
               </select>
               <input
@@ -294,13 +309,19 @@ export default function Tables() {
               No documents match the filter.
             </div>
           ) : (
-            <div style={{ overflowX: 'auto' }}>
+            <div style={{
+              overflow: 'auto',
+              maxHeight: 'calc(100vh - 350px)',
+              maxWidth: '100%',
+              WebkitOverflowScrolling: 'touch'
+            }}>
               <table style={{
-                width: '100%',
+                minWidth: '100%',
                 borderCollapse: 'collapse',
-                fontSize: '0.85rem'
+                fontSize: '0.85rem',
+                tableLayout: 'auto'
               }}>
-                <thead>
+                <thead style={{ position: 'sticky', top: 0, zIndex: 10 }}>
                   <tr style={{ backgroundColor: '#f5f7fa' }}>
                     {columns.map(col => (
                       <th
@@ -311,10 +332,11 @@ export default function Tables() {
                           borderBottom: '2px solid #12265e',
                           whiteSpace: 'nowrap',
                           color: '#12265e',
-                          fontWeight: '600'
+                          fontWeight: '600',
+                          backgroundColor: '#f5f7fa'
                         }}
                       >
-                        {col}
+                        {col === '_userName' ? 'User Name' : col}
                       </th>
                     ))}
                   </tr>
