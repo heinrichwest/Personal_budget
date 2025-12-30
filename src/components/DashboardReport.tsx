@@ -63,6 +63,10 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
             expenses: number
             count: number
         }
+        budgetTotals: {
+            income: number
+            expenses: number
+        }
     } | null>(null)
 
     // Modal States
@@ -161,14 +165,47 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
             const { start: globalStart } = getRangeForFiscalMonth(earliestKeyParts[0], earliestKeyParts[1] - 1, monthStartDay)
             const { end: globalEnd } = getRangeForFiscalMonth(latestKeyParts[0], latestKeyParts[1] - 1, monthStartDay)
 
-            // 1.5 Fetch System Config for Groupings
-            const systemDoc = await getDoc(doc(db, 'systemConfig', 'main'))
+            // 1.5 Fetch System Config for Groupings and Category Mappings
             let groupings: any[] = []
-            if (systemDoc.exists()) {
-                const sData = systemDoc.data()
-                groupings = sData.groupings || []
+            let systemCategoryTypes = new Map<string, string>()
+
+            try {
+                // Previously was getDoc('main'), let's stick to that or query if safer. 
+                // SystemConfig.tsx saves to 'main'.
+                const systemDoc = await getDoc(doc(db, 'systemConfig', 'main'))
+                if (systemDoc.exists()) {
+                    const sData = systemDoc.data()
+                    groupings = sData.groupings || []
+
+                    // Index default category mappings
+                    if (Array.isArray(sData.defaultCategories)) {
+                        sData.defaultCategories.forEach((cat: any) => {
+                            if (cat && cat.name && cat.type) {
+                                systemCategoryTypes.set(cat.name.trim().toLowerCase(), cat.type)
+                            }
+                        })
+                    }
+                } else {
+                    // Fallback to query if 'main' doc doesn't exist (older versions)
+                    const qConfig = await getDocs(collection(db, 'systemConfig'))
+                    if (!qConfig.empty) {
+                        const sData = qConfig.docs[0].data()
+                        groupings = sData.groupings || []
+                        if (Array.isArray(sData.defaultCategories)) {
+                            sData.defaultCategories.forEach((cat: any) => {
+                                // handle both string and object format
+                                if (typeof cat === 'object' && cat.name && cat.type) {
+                                    systemCategoryTypes.set(cat.name.trim().toLowerCase(), cat.type)
+                                }
+                            })
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error("Error loading system config", e)
             }
-            // Fallback
+
+            // Fallback Groupings
             if (groupings.length === 0) {
                 groupings = [
                     { id: 'income', name: 'Income', isIncome: true, sortOrder: 0 },
@@ -180,19 +217,88 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
 
             // 2. Fetch budgets
             const budgetsSnapshot = await getDocs(query(collection(db, 'budgets'), where('userId', '==', currentUser.uid)))
-            const rawBudgets = budgetsSnapshot.docs.map(d => ({ id: d.id, ...d.data() } as BudgetCategory))
+            let allBudgetItems = budgetsSnapshot.docs.map(d => {
+                const data = d.data()
+                const normName = (data.name || '').trim().toLowerCase()
+                const systemType = systemCategoryTypes.get(normName)
 
-            // Deduplicate by name and sort
-            const uniqueBudgets = Array.from(new Map(rawBudgets.map(item => [item.name.trim(), item])).values())
-            uniqueBudgets.sort((a, b) => a.name.localeCompare(b.name))
-
-            setAllBudgets(uniqueBudgets)
+                return {
+                    id: d.id,
+                    ...data,
+                    // FORCE Override: If system has a defined type for this category name, USE IT.
+                    type: systemType || data.type || 'monthly'
+                } as BudgetCategory
+            })
 
             // 3. Fetch transactions (Fetch all for user to avoid Index requirements, then filter in memory)
             const transactionsSnapshot = await getDocs(query(
                 collection(db, 'transactions'),
                 where('userId', '==', currentUser.uid)
             ))
+
+            // 3.1 Discover "Unbudgeted" Categories used in Transactions
+            // If a transaction has a category that isn't in 'budgets', we should treating it as a visible category with 0 budget
+            const existingIds = new Set(allBudgetItems.map(b => b.id))
+            const existingNames = new Set(allBudgetItems.map(b => b.name.trim().toLowerCase()))
+
+            const discovered: BudgetCategory[] = []
+
+            transactionsSnapshot.docs.forEach(doc => {
+                const t = doc.data()
+                if (t.categoryId && !existingIds.has(t.categoryId)) {
+                    // Check if we already have it in discovered or existing by Name (to avoid dups)
+                    const name = (t.categoryName || 'Unknown').trim()
+                    const normName = name.toLowerCase()
+
+                    if (name && !existingNames.has(normName)) {
+                        // Double check we haven't added it to discovered yet
+                        if (!discovered.find(d => d.id === t.categoryId)) {
+                            discovered.push({
+                                id: t.categoryId,
+                                name: t.categoryName || 'Unknown',
+                                amount: 0,
+                                userId: currentUser.uid,
+                                type: 'monthly' // Default to monthly expenses? Or try to guess? 'monthly' is safest fallback
+                            })
+                            // Add to existing names to prevent re-adding
+                            existingNames.add(normName)
+                        }
+                    }
+                }
+            })
+
+            // Combine Explicit Budgets + Implicit Discovered Categories
+            const combinedBudgets = [...allBudgetItems, ...discovered]
+
+            // Deduplicate by name, prioritizing specific types over generic 'monthly'
+            const budgetMap = new Map<string, BudgetCategory>()
+            const genericTypes = ['monthly', 'adhoc', 'income', 'monthly expenses', 'adhoc expenses']
+
+            combinedBudgets.forEach(b => {
+                const norm = b.name.trim().toLowerCase()
+                if (!budgetMap.has(norm)) {
+                    budgetMap.set(norm, b)
+                } else {
+                    const existing = budgetMap.get(norm)!
+                    // If existing is generic but new is specific, replace it
+                    const existingIsGeneric = !existing.type || genericTypes.includes(existing.type.toLowerCase())
+                    const newIsGeneric = !b.type || genericTypes.includes(b.type.toLowerCase())
+
+                    if (existingIsGeneric && !newIsGeneric) {
+                        budgetMap.set(norm, b)
+                    }
+                    // If both specific, prefer the one with higher budget? or just keep first/last?
+                    // Currently keep first (existing) unless improved.
+                }
+            })
+
+            const uniqueBudgets = Array.from(budgetMap.values())
+            uniqueBudgets.sort((a, b) => a.name.localeCompare(b.name))
+
+            setAllBudgets(uniqueBudgets)
+
+            // Use combined for rows generation
+            const rawBudgets = combinedBudgets
 
             // 4. Initialize Data Structure
             const initSection = () => ({ rows: [], totalBudget: 0, totalMonths: {} })
@@ -224,7 +330,7 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
             rawBudgets.forEach(cat => {
                 const normName = cat.name.trim().toLowerCase()
                 const type = cat.type || 'monthly'
-                const amount = typeof cat.amount === 'number' ? cat.amount : parseFloat(cat.amount) || 0
+                const amount = typeof cat.amount === 'number' ? cat.amount : parseFloat(cat.amount as any) || 0
 
                 if (!rowsMap.has(normName)) {
                     rowsMap.set(normName, {
@@ -240,21 +346,46 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                     const existing = rowsMap.get(normName)!
                     existing.ids.push(cat.id!)
                     existing.budget += amount
+
+                    // Smart Type Merge: If existing is generic 'monthly' but new is specific, upgrade it.
+                    if (existing.type === 'monthly' && type !== 'monthly') {
+                        existing.type = type
+                    }
                 }
             })
 
             // Push merged rows to sections
+            // Push merged rows to sections
             rowsMap.forEach((row) => {
-                // If type doesn't exist in groupings, default to first non-income or just first one
                 let targetType = row.type
-                if (!sections[targetType]) {
-                    // Fallback: try to find a generic expense group or just put in first available
-                    // Ideally we should have a 'Other' group but logic is strict
-                    const fallback = groupings.find(g => !g.isIncome) || groupings[0]
-                    targetType = fallback.id
+                let targetGroup = groupings.find(g => g.id === targetType)
+
+                // 1. Try case-insensitive ID match
+                if (!targetGroup) {
+                    targetGroup = groupings.find(g => g.id.toLowerCase() === targetType.toLowerCase())
+                    if (targetGroup) targetType = targetGroup.id
+                }
+
+                // 2. Try Name match (e.g. type="Debit Orders" matches Group Name "Debit Orders")
+                if (!targetGroup) {
+                    targetGroup = groupings.find(g => g.name.toLowerCase() === targetType.toLowerCase())
+                    if (targetGroup) targetType = targetGroup.id
+                }
+
+                // 3. If still not found, Create Dynamic Group 
+                // (This happens if user typed a custom Category Type 'Debit Orders' that isn't in system config)
+                if (!targetGroup) {
+                    // Create ad-hoc group
+                    const newId = targetType.replace(/\s+/g, '_').toLowerCase()
+                    targetGroup = { id: newId, name: targetType, isIncome: false, sortOrder: 999 } // Append to end
+                    groupings.push(targetGroup)
+                    sections[newId] = initSection()
+                    monthKeys.forEach(k => sections[newId].totalMonths[k] = 0)
+                    targetType = newId
                 }
 
                 const section = sections[targetType]
+                // Final safety check
                 if (section) {
                     const finalRow: CategoryRow = {
                         id: row.ids[0],
@@ -266,6 +397,13 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
 
                     section.rows.push(finalRow)
                     section.totalBudget += row.budget
+                } else {
+                    // Should technically never happen due to step 3, but safe fallback
+                    const fallback = groupings.find(g => !g.isIncome) || groupings[0]
+                    sections[fallback.id].rows.push({
+                        id: row.ids[0], name: row.name, budget: row.budget, months: row.months, ids: row.ids
+                    } as any)
+                    sections[fallback.id].totalBudget += row.budget
                 }
             })
 
@@ -321,31 +459,54 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
 
                 if (!monthKeys.includes(key)) return // Outside our view range
 
-                if (!catId) {
+                const hasId = !!catId
+                const hasName = !!txn.categoryName
+
+                if (!hasId && !hasName) {
                     // Unmapped
                     unmapped.months[key].amount += amount
                     unmapped.months[key].txns.push(txn)
                 } else {
                     let found = false
-                    const txnName = (txn.categoryName || '').trim().toLowerCase()
 
-                    // 1. Try match by ID (preferred)
-                    // Check all sections
-                    for (const groupId of Object.keys(sections)) {
-                        const row = sections[groupId].rows.find((r: any) => r.ids && r.ids.includes(catId))
-                        if (row) {
-                            row.months[key].amount += amount
-                            row.months[key].txns.push(txn)
-                            sections[groupId].totalMonths[key] += amount
-                            found = true
-                            break
+                    // 1. Resolve Best Possible Name for Matching
+                    // If we have a category ID, check if it exists in our current budgets. 
+                    // If so, use that Budget's name as the truth.
+                    let authoritativeName = ''
+                    if (hasId) {
+                        const sourceCat = rawBudgets.find(b => b.id === catId)
+                        if (sourceCat) {
+                            authoritativeName = sourceCat.name
                         }
                     }
 
-                    // 2. Fallback: Try match by Name (if name exists)
-                    if (!found && txnName) {
+                    if (!authoritativeName) {
+                        authoritativeName = txn.categoryName || ''
+                    }
+
+                    const matchName = authoritativeName.replace(/\s+/g, ' ').trim().toLowerCase()
+
+                    // 2. Try match by ID (Strongest Match)
+                    if (hasId) {
                         for (const groupId of Object.keys(sections)) {
-                            const row = sections[groupId].rows.find((r: any) => r.name.trim().toLowerCase() === txnName)
+                            const row = sections[groupId].rows.find((r: any) => r.ids && r.ids.includes(catId))
+                            if (row) {
+                                row.months[key].amount += amount
+                                row.months[key].txns.push(txn)
+                                sections[groupId].totalMonths[key] += amount
+                                found = true
+                                break
+                            }
+                        }
+                    }
+
+                    // 3. Fallback: Try match by Name (if ID match failed or no ID)
+                    if (!found && matchName) {
+                        for (const groupId of Object.keys(sections)) {
+                            // Normalize row name same way
+                            const row = sections[groupId].rows.find((r: any) =>
+                                r.name.replace(/\s+/g, ' ').trim().toLowerCase() === matchName
+                            )
                             if (row) {
                                 row.months[key].amount += amount
                                 row.months[key].txns.push(txn)
@@ -453,6 +614,17 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                 runningBalance = closing
             }
 
+            // Calculate Budget Totals
+            let totalIncomeBudget = 0
+            let totalExpenseBudget = 0
+            groupings.forEach(g => {
+                const sec = sections[g.id]
+                if (sec) {
+                    if (g.isIncome) totalIncomeBudget += sec.totalBudget
+                    else totalExpenseBudget += sec.totalBudget
+                }
+            })
+
             setReportData({
                 sections,
                 groupings,
@@ -465,6 +637,10 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                     income: grossIncome,
                     expenses: grossExpenses,
                     count: grossCount
+                },
+                budgetTotals: {
+                    income: totalIncomeBudget,
+                    expenses: totalExpenseBudget
                 }
             })
 
@@ -548,41 +724,61 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
         const val = parseFloat(newValue)
         if (isNaN(val)) return
 
+        // blocked updates if reportData is missing
+        if (!reportData) return
+
         try {
-            // Our row might combine multiple IDs if they share a name, but for editing we need real single IDs.
-            // In our current mapping logic, we combine rows by name. This makes editing tricky.
-            // Simplification: We only support editing if the row represents a single category or we assume we edit all?
-            // "rowsMap" combines IDs.
-            // Let's assume most users have unique names. If there are multiple IDs, we update the first one or we need to refine the rows logic.
-            // For now, let's update the first ID found.
+            // 1. Optimistically Update State
+            // Deep copy structure we intend to mutate
+            const newReportData = { ...reportData }
+            const newSections = { ...newReportData.sections }
 
-            // Wait, we attached 'ids' array to the row.
-            // Let's modify the FIRST doc.
-            if (!rowId) return
+            let found = false
+            for (const unionId of Object.keys(newSections)) {
+                // Find section containing this row
+                const section = newSections[unionId]
+                const rowIndex = section.rows.findIndex(r => r.id === rowId)
 
-            const docId = rowId
-            await updateDoc(doc(db, 'budgets', docId), {
+                if (rowIndex !== -1) {
+                    // Create new reference for section to trigger re-render
+                    const newSection = {
+                        ...section,
+                        rows: [...section.rows]
+                    }
+
+                    const oldRow = newSection.rows[rowIndex]
+                    const diff = val - oldRow.budget
+
+                    // Update Row
+                    newSection.rows[rowIndex] = {
+                        ...oldRow,
+                        budget: val
+                    }
+
+                    // Update Section Total
+                    newSection.totalBudget += diff
+
+                    newSections[unionId] = newSection
+                    found = true
+                    break
+                }
+            }
+
+            if (found) {
+                newReportData.sections = newSections
+                setReportData(newReportData)
+            }
+
+            // 2. Persist to Firestore (Background)
+            await updateDoc(doc(db, 'budgets', rowId), {
                 amount: val
             })
 
-            // Optimistically update local state for UI responsiveness
-            if (reportData) {
-                const sections = { ...reportData.sections }
-                Object.keys(sections).forEach(gid => {
-                    const row = sections[gid].rows.find(r => r.id === docId)
-                    if (row) {
-                        row.budget = val
-                        // Recalculate totals not implemented here for brevity, usually should render from props or reload
-                    }
-                })
-                // Ideally we should reload or update complex state. Reloading is safest for totals.
-                // setReportData({...reportData, sections})
-                generateReport() // Reload to be safe and update totals
-            }
-
+            // No need to reload everything
         } catch (e) {
             console.error("Error updating budget", e)
-            alert("Failed to update budget")
+            alert("Failed to update budget. Please refresh.")
+            generateReport() // Revert state on error
         }
     }
 
@@ -737,7 +933,7 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                         {/* Total Income */}
                         <tr>
                             <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem', color: '#2e7d32' }}>Total Income</td>
-                            <td className="sticky-col second-col num-col">-</td>
+                            <td className="sticky-col second-col num-col">{fmt(reportData.budgetTotals.income)}</td>
                             {monthKeys.map(k => (
                                 <td
                                     key={k}
@@ -753,7 +949,7 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                         {/* Total Expenses */}
                         <tr>
                             <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem', color: '#c62828' }}>Total Expenses</td>
-                            <td className="sticky-col second-col num-col">-</td>
+                            <td className="sticky-col second-col num-col">{fmt(reportData.budgetTotals.expenses)}</td>
                             {monthKeys.map(k => (
                                 <td
                                     key={k}
@@ -769,7 +965,9 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                         {/* Net Surplus/Deficit */}
                         <tr>
                             <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem', fontWeight: 500 }}>Net Surplus/Deficit</td>
-                            <td className="sticky-col second-col num-col">-</td>
+                            <td className="sticky-col second-col num-col" style={{ fontWeight: 'bold' }}>
+                                {fmt(reportData.budgetTotals.income - reportData.budgetTotals.expenses)}
+                            </td>
                             {monthKeys.map(k => {
                                 const val = reportData.balances.net[k]
                                 return (

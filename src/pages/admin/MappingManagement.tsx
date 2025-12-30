@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { collection, getDocs, getDoc, updateDoc, deleteDoc, doc, query, orderBy } from 'firebase/firestore'
+import { useAuth } from '../../contexts/AuthContext'
+import { collection, getDocs, getDoc, updateDoc, deleteDoc, addDoc, doc, query, orderBy, where, writeBatch } from 'firebase/firestore'
 import { db } from '../../config/firebase'
 import './Admin.css'
 
@@ -24,6 +25,7 @@ function toTitleCase(str: string) {
 }
 
 export default function MappingManagement() {
+  const { currentUser, isAdmin } = useAuth()
   const [mappings, setMappings] = useState<TransactionMapping[]>([])
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState('all')
@@ -33,6 +35,8 @@ export default function MappingManagement() {
   const [allCategories, setAllCategories] = useState<Array<{ id: string, name: string, userId: string }>>([])
   const [systemDefaults, setSystemDefaults] = useState<string[]>([])
   const [sortConfig, setSortConfig] = useState<{ field: keyof TransactionMapping, direction: 'asc' | 'desc' } | null>(null)
+  const [systemRulesSet, setSystemRulesSet] = useState<Set<string>>(new Set())
+  const [searchTerm, setSearchTerm] = useState('')
 
   useEffect(() => {
     loadMappings()
@@ -62,34 +66,59 @@ export default function MappingManagement() {
   }
 
   async function loadMappings() {
+    if (!currentUser) return // Auth check
+
     try {
-      const q = query(collection(db, 'transactionMappings'), orderBy('updatedAt', 'desc'))
-      const snapshot = await getDocs(q)
+      let rawMappings: any[] = []
+
+      if (isAdmin) {
+        // Admin: Load ALL
+        const q = query(collection(db, 'transactionMappings'), orderBy('updatedAt', 'desc'))
+        const snapshot = await getDocs(q)
+        rawMappings = snapshot.docs.map(d => ({ id: d.id, ...d.data() }))
+      } else {
+        // User: Load System (no userId or userId='SYSTEM') AND Personal (userId=uid)
+        const systemQ = query(
+          collection(db, 'transactionMappings'),
+          where('userId', 'in', ['SYSTEM', null])
+        )
+        const personalQ = query(
+          collection(db, 'transactionMappings'),
+          where('userId', '==', currentUser.uid)
+        )
+
+        const [sysSnap, persSnap] = await Promise.all([getDocs(systemQ), getDocs(personalQ)])
+
+        const sysDocs = sysSnap.docs.map(d => ({ id: d.id, ...d.data(), isSystem: true }))
+        const persDocs = persSnap.docs.map(d => ({ id: d.id, ...d.data(), isSystem: false }))
+
+        // Track system rules to know if "Revert" is possible
+        const sysDesc = new Set(sysDocs.map(d => d.originalDescription.toLowerCase().trim()))
+        setSystemRulesSet(sysDesc)
+
+        rawMappings = [...persDocs, ...sysDocs]
+      }
 
       const userIds = new Set<string>()
       const categoryIds = new Set<string>()
 
-      const rawMappings = snapshot.docs.map(doc => {
-        const data = doc.data()
-        if (data.userId) userIds.add(data.userId)
+      rawMappings.forEach(data => {
+        if (data.userId && data.userId !== 'SYSTEM') userIds.add(data.userId)
         if (data.categoryId) categoryIds.add(data.categoryId)
-        return { id: doc.id, ...data }
       })
 
-      const userPromises = Array.from(userIds).map(id => getDoc(doc(db, 'users', id)))
-      const categoryPromises = Array.from(categoryIds).map(id => getDoc(doc(db, 'budgets', id)))
-
-      const [userSnaps, categorySnaps] = await Promise.all([
-        Promise.all(userPromises),
-        Promise.all(categoryPromises)
-      ])
-
+      // Fetch metadata (Users/Categories)
       const userMap = new Map<string, string>()
-      userSnaps.forEach(snap => {
-        if (snap.exists()) {
-          userMap.set(snap.id, snap.data().email)
-        }
-      })
+      if (isAdmin && userIds.size > 0) {
+        const userPromises = Array.from(userIds).map(id => getDoc(doc(db, 'users', id)))
+        const userSnaps = await Promise.all(userPromises)
+        userSnaps.forEach(snap => {
+          if (snap.exists()) userMap.set(snap.id, snap.data().email)
+        })
+      }
+
+      const categoryPromises = Array.from(categoryIds).map(id => getDoc(doc(db, 'budgets', id)))
+      const categorySnaps = await Promise.all(categoryPromises)
 
       const categoryMap = new Map<string, string>()
       categorySnaps.forEach(snap => {
@@ -114,14 +143,28 @@ export default function MappingManagement() {
           mappedDescription: data.mappedDescription,
           categoryId: data.categoryId,
           categoryName: catName,
-          userId: data.userId,
-          userEmail: data.userId ? userMap.get(data.userId) : undefined,
-          createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : new Date(data.createdAt),
-          updatedAt: data.updatedAt?.toDate ? data.updatedAt.toDate() : new Date(data.updatedAt),
+          userId: data.userId || 'SYSTEM',
+          userEmail: (!data.userId || data.userId === 'SYSTEM') ? 'System Generic' : (userMap.get(data.userId) || 'Unknown'),
+          createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : new Date(data.createdAt || Date.now()),
+          updatedAt: data.updatedAt?.toDate ? data.updatedAt.toDate() : new Date(data.updatedAt || Date.now()),
         }
       })
 
-      setMappings(mappingsList)
+      // Filter Overrides for User View
+      if (!isAdmin) {
+        const personalDescriptions = new Set(mappingsList.filter(m => m.userId !== 'SYSTEM').map(m => m.originalDescription.toLowerCase().trim()))
+        const filteredList = mappingsList.filter(m => {
+          if (m.userId === 'SYSTEM') {
+            // Hide if overridden
+            return !personalDescriptions.has(m.originalDescription.toLowerCase().trim())
+          }
+          return true
+        })
+        setMappings(filteredList)
+      } else {
+        setMappings(mappingsList)
+      }
+
     } catch (error) {
       console.error('Error loading mappings:', error)
     } finally {
@@ -133,7 +176,6 @@ export default function MappingManagement() {
     setEditingId(mapping.id)
     setEditMapDesc(toTitleCase(mapping.mappedDescription))
 
-    // Normalize category ID to the first match by name to handle duplicates
     if (mapping.categoryId) {
       const userCats = allCategories.filter(c => c.userId === mapping.userId)
       const currentCat = userCats.find(c => c.id === mapping.categoryId)
@@ -163,45 +205,167 @@ export default function MappingManagement() {
   }
 
   async function saveEdit(id: string) {
-    try {
-      const ref = doc(db, 'transactionMappings', id)
-      const now = new Date()
-      await updateDoc(ref, {
-        mappedDescription: editMapDesc,
-        categoryId: editCatId || null,
-        updatedAt: now
-      })
+    if (!currentUser) return
 
-      // Update local state to avoid re-fetch jump
-      setMappings(prev => prev.map(m => {
-        if (m.id === id) {
-          // Find new category name
-          let newCatName = undefined
-          if (editCatId) {
-            const cat = allCategories.find(c => c.id === editCatId)
-            // Or check if it's a new system default being added
-            if (cat) {
-              newCatName = cat.name
-            } else if (editCatId.startsWith('NEW:')) {
-              newCatName = editCatId.substring(4)
+    try {
+      const mappingToUpdate = mappings.find(m => m.id === id)
+      if (!mappingToUpdate) return
+
+      const now = new Date()
+
+      let newCatName = undefined
+      if (editCatId) {
+        const cat = allCategories.find(c => c.id === editCatId)
+        if (cat) {
+          newCatName = cat.name
+        } else if (editCatId.startsWith('NEW:')) {
+          newCatName = editCatId.substring(4)
+        }
+      }
+
+      let shouldUpdateHistory = false
+      let historyOwnerId = currentUser.uid
+
+      if (mappingToUpdate.userId === 'SYSTEM' && !isAdmin) {
+        await addDoc(collection(db, 'transactionMappings'), {
+          originalDescription: mappingToUpdate.originalDescription,
+          mappedDescription: editMapDesc,
+          categoryId: editCatId || null,
+          categoryName: newCatName,
+          userId: currentUser.uid,
+          createdAt: now,
+          updatedAt: now
+        })
+
+        shouldUpdateHistory = true
+        historyOwnerId = currentUser.uid
+
+        alert("Personal override created! Updating your historical transactions...")
+
+      } else {
+        const ref = doc(db, 'transactionMappings', id)
+
+        await updateDoc(ref, {
+          mappedDescription: editMapDesc,
+          categoryId: editCatId || null,
+          updatedAt: now
+        })
+
+        if (mappingToUpdate.userId !== 'SYSTEM') {
+          shouldUpdateHistory = true
+          historyOwnerId = mappingToUpdate.userId
+        }
+
+        setMappings(prev => prev.map(m => {
+          if (m.id === id) {
+            return {
+              ...m,
+              mappedDescription: editMapDesc,
+              categoryId: editCatId,
+              categoryName: newCatName,
+              updatedAt: now
             }
           }
+          return m
+        }))
+      }
 
-          return {
-            ...m,
-            mappedDescription: editMapDesc,
-            categoryId: editCatId,
-            categoryName: newCatName,
-            updatedAt: now
-          }
+      if (shouldUpdateHistory) {
+        const q = query(
+          collection(db, 'transactions'),
+          where('userId', '==', historyOwnerId)
+        )
+
+        const snapshot = await getDocs(q)
+
+        if (!snapshot.empty) {
+          const batch = writeBatch(db)
+          let batchCount = 0
+          const targetDesc = mappingToUpdate.originalDescription.trim().toLowerCase()
+
+          snapshot.docs.forEach(docSnap => {
+            const d = docSnap.data()
+            if ((d.originalDescription || d.description || '').trim().toLowerCase() === targetDesc) {
+              batch.update(docSnap.ref, {
+                mappedDescription: editMapDesc,
+                categoryId: editCatId || null,
+                categoryName: newCatName || null
+              })
+              batchCount++
+            }
+          })
+          if (batchCount > 0) await batch.commit()
         }
-        return m
-      }))
+      }
+
+      if (mappingToUpdate.userId === 'SYSTEM' && !isAdmin) {
+        await loadMappings()
+      } else {
+        alert("Mapping updated.")
+      }
 
       setEditingId(null)
+
     } catch (e) {
       console.error("Error updating mapping", e)
       alert("Failed to update mapping")
+    }
+  }
+
+  async function reapplyRuleToHistory(originalDesc: string, targetUserId: string) {
+    try {
+      // Find the "Winner" Rule for this description (System or Personal)
+      const q = query(collection(db, 'transactionMappings'), where('originalDescription', '==', originalDesc))
+      const snap = await getDocs(q)
+      const candidates = snap.docs.map(d => d.data() as TransactionMapping)
+
+      // 1. Personal Rule
+      let winner = candidates.find(c => c.userId === targetUserId)
+      // 2. System Rule (if no personal)
+      if (!winner) {
+        winner = candidates.find(c => c.userId === 'SYSTEM' || !c.userId)
+      }
+
+      const batch = writeBatch(db)
+      let batchCount = 0
+
+      // Get transactions to update
+      const transQ = query(
+        collection(db, 'transactions'),
+        where('userId', '==', targetUserId)
+      )
+
+      const transSnap = await getDocs(transQ)
+      const targetDescClean = originalDesc.trim().toLowerCase()
+
+      transSnap.docs.forEach(docSnap => {
+        const t = docSnap.data()
+        const tDesc = (t.originalDescription || t.description || '').trim().toLowerCase()
+
+        if (tDesc === targetDescClean) {
+          if (winner) {
+            batch.update(docSnap.ref, {
+              mappedDescription: winner.mappedDescription,
+              categoryId: winner.categoryId || null,
+              categoryName: winner.categoryName || null
+            })
+          } else {
+            // Revert to original if no rule exists
+            batch.update(docSnap.ref, {
+              mappedDescription: t.originalDescription || t.description,
+              categoryId: null,
+              categoryName: null
+            })
+          }
+          batchCount++
+        }
+      })
+
+      if (batchCount > 0) {
+        await batch.commit()
+      }
+    } catch (e) {
+      console.error("Error reapplying history", e)
     }
   }
 
@@ -209,28 +373,65 @@ export default function MappingManagement() {
     if (!confirm('Are you sure you want to delete this mapping?')) return
 
     try {
+      const mappingToDelete = mappings.find(m => m.id === id)
+      if (!mappingToDelete) return
+
       await deleteDoc(doc(db, 'transactionMappings', id))
-      setMappings(prev => prev.filter(m => m.id !== id))
+
+      if (currentUser) {
+        await reapplyRuleToHistory(mappingToDelete.originalDescription, currentUser.uid)
+      }
+
+      await loadMappings()
     } catch (error) {
       console.error('Error deleting mapping:', error)
       alert('Failed to delete mapping')
     }
   }
 
-  const [searchTerm, setSearchTerm] = useState('')
+  async function ignoreMapping(mapping: TransactionMapping) {
+    if (!currentUser) return
 
-  // ... (rest of state)
+    try {
+      const now = new Date()
+      const targetDesc = mapping.originalDescription
 
-  // ... (load functions)
+      // If it's a System Rule, create a Personal Override with NO category
+      if (mapping.userId === 'SYSTEM' && !isAdmin) {
+        await addDoc(collection(db, 'transactionMappings'), {
+          originalDescription: targetDesc,
+          mappedDescription: targetDesc, // Map to itself
+          categoryId: null,
+          categoryName: null,
+          userId: currentUser.uid,
+          createdAt: now,
+          updatedAt: now
+        })
+      } else {
+        // If it's already a Personal Rule, just ensure it has no category
+        const ref = doc(db, 'transactionMappings', mapping.id)
+        await updateDoc(ref, {
+          mappedDescription: targetDesc,
+          categoryId: null,
+          categoryName: null,
+          updatedAt: now
+        })
+      }
 
-  // ... (edit/delete functions)
+      await reapplyRuleToHistory(targetDesc, currentUser.uid)
+      await loadMappings()
+      alert("Mapping ignored for future transactions.")
+
+    } catch (e) {
+      console.error("Error ignoring mapping", e)
+      alert("Failed to ignore mapping")
+    }
+  }
 
   const filteredMappings = mappings.filter(m => {
-    // 1. Filter Check
     if (filter === 'withCategory' && !m.categoryId) return false
     if (filter === 'withoutCategory' && !!m.categoryId) return false
 
-    // 2. Search Check
     if (searchTerm) {
       const lowerSearch = searchTerm.toLowerCase()
       const matchOriginal = m.originalDescription.toLowerCase().includes(lowerSearch)
@@ -245,7 +446,6 @@ export default function MappingManagement() {
 
   if (sortConfig !== null) {
     filteredMappings.sort((a, b) => {
-      // Handle potentially undefined values safely
       const valA = a[sortConfig.field]
       const valB = b[sortConfig.field]
 
@@ -295,28 +495,138 @@ export default function MappingManagement() {
           onChange={(e) => setSearchTerm(e.target.value)}
           style={{ padding: '0.6rem', borderRadius: '4px', border: '1px solid #ddd', minWidth: '250px' }}
         />
+
+        {isAdmin && (
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: '10px' }}>
+            <button
+              className="btn-primary"
+              onClick={async () => {
+                const candidates = filteredMappings.filter(m => m.userId !== 'SYSTEM')
+                if (candidates.length === 0) {
+                  alert('No user mappings found in current view to promote.')
+                  return
+                }
+                if (!confirm(`Promote ${candidates.length} mappings to System Defaults? This will make them global.`)) return
+
+                try {
+                  const batch = writeBatch(db)
+                  candidates.forEach(m => {
+                    const ref = doc(db, 'transactionMappings', m.id)
+                    batch.update(ref, { userId: 'SYSTEM' })
+                  })
+                  await batch.commit()
+                  alert("Mappings promoted successfully.")
+                  loadMappings()
+                } catch (e) {
+                  console.error(e)
+                  alert("Batch update failed")
+                }
+              }}
+            >
+              Promote Visible to System
+            </button>
+          </div>
+        )}
       </div>
 
+      {isAdmin && (
+        <div style={{ marginTop: '1rem', marginBottom: '1rem', padding: '1rem', border: '1px dashed #ccc', borderRadius: '4px', backgroundColor: '#fafafa' }}>
+          <strong>Debug Actions:</strong>
+          <button
+            onClick={async () => {
+              try {
+                const now = new Date()
+                const desc = "MES"
+                await addDoc(collection(db, 'transactionMappings'), {
+                  originalDescription: desc,
+                  mappedDescription: "Mes_h",
+                  categoryId: null,
+                  categoryName: "House Taxes",
+                  userId: "SYSTEM",
+                  createdAt: now,
+                  updatedAt: now
+                })
+
+                if (currentUser) {
+                  await reapplyRuleToHistory(desc, currentUser.uid)
+                }
+
+                alert("Restored 'MES' System Rule & Updated Transaction History")
+                loadMappings()
+              } catch (e) { console.error(e); alert("Failed") }
+            }}
+            style={{ marginLeft: '1rem' }}
+            className="btn-outline btn-sm"
+          >
+            Restore 'MES' Rule
+          </button>
+          <span style={{ fontSize: '0.8rem', color: '#666', marginLeft: '1rem' }}>
+            (Use to restore 'MES' if accidentally deleted)
+          </span>
+        </div>
+      )}
+
+      {/* Specific Adoption Banner */}
+      {isAdmin && mappings.some(m => m.userEmail === 'hein@speccon.co.za') && (
+        <div style={{ backgroundColor: '#e3f2fd', padding: '1rem', borderRadius: '8px', marginBottom: '1rem', border: '1px solid #2196f3', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <h3 style={{ margin: 0, color: '#0d47a1' }}>Test Data Detected</h3>
+            <p style={{ margin: '0.5rem 0 0', color: '#1565c0' }}>
+              Found {mappings.filter(m => m.userEmail === 'hein@speccon.co.za').length} mappings from <strong>hein@speccon.co.za</strong>.
+              Do you want to use these as the System Defaults?
+            </p>
+          </div>
+          <button
+            className="btn-primary"
+            style={{ backgroundColor: '#1565c0' }}
+            onClick={async () => {
+              if (!confirm("Convert all 'hein@speccon.co.za' data to System Defaults?")) return
+
+              const candidates = mappings.filter(m => m.userEmail === 'hein@speccon.co.za')
+              const batch = writeBatch(db)
+
+              candidates.forEach(m => {
+                const ref = doc(db, 'transactionMappings', m.id)
+                batch.update(ref, { userId: 'SYSTEM' })
+              })
+
+              try {
+                await batch.commit()
+                alert("Successfully converted test data to System Defaults!")
+                loadMappings()
+              } catch (e) {
+                console.error(e)
+                alert("Conversion failed")
+              }
+            }}
+          >
+            Adopt as System Data
+          </button>
+        </div>
+      )}
+
       <div className="admin-table-container" style={{ maxHeight: '70vh', overflowY: 'auto' }}>
-        <table className="admin-table">
+        <table className="admin-table" style={{ borderCollapse: 'separate', borderSpacing: 0 }}>
           <thead>
             <tr>
-              <th onClick={() => handleSort('originalDescription')} style={{ position: 'sticky', top: 0, zIndex: 10, backgroundColor: 'white', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
+              <th onClick={() => handleSort('originalDescription')} style={{ position: 'sticky', top: 0, zIndex: 1000, backgroundColor: 'white', cursor: 'pointer', borderBottom: '2px solid #e0e0e0', boxShadow: '0 1px 0 #e0e0e0' }}>
                 Original Description {sortConfig?.field === 'originalDescription' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
               </th>
-              <th onClick={() => handleSort('mappedDescription')} style={{ position: 'sticky', top: 0, zIndex: 10, backgroundColor: 'white', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
+              <th onClick={() => handleSort('mappedDescription')} style={{ position: 'sticky', top: 0, zIndex: 1000, backgroundColor: 'white', cursor: 'pointer', borderBottom: '2px solid #e0e0e0', boxShadow: '0 1px 0 #e0e0e0' }}>
                 Mapped Description {sortConfig?.field === 'mappedDescription' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
               </th>
-              <th onClick={() => handleSort('categoryName')} style={{ position: 'sticky', top: 0, zIndex: 10, backgroundColor: 'white', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
+              <th onClick={() => handleSort('categoryName')} style={{ position: 'sticky', top: 0, zIndex: 1000, backgroundColor: 'white', cursor: 'pointer', borderBottom: '2px solid #e0e0e0', boxShadow: '0 1px 0 #e0e0e0' }}>
                 Category {sortConfig?.field === 'categoryName' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
               </th>
-              <th onClick={() => handleSort('userEmail')} style={{ position: 'sticky', top: 0, zIndex: 10, backgroundColor: 'white', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
-                User {sortConfig?.field === 'userEmail' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
-              </th>
-              <th onClick={() => handleSort('updatedAt')} style={{ position: 'sticky', top: 0, zIndex: 10, backgroundColor: 'white', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
+              {isAdmin && (
+                <th onClick={() => handleSort('userEmail')} style={{ position: 'sticky', top: 0, zIndex: 1000, backgroundColor: 'white', cursor: 'pointer', borderBottom: '2px solid #e0e0e0', boxShadow: '0 1px 0 #e0e0e0' }}>
+                  User {sortConfig?.field === 'userEmail' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
+                </th>
+              )}
+              <th onClick={() => handleSort('updatedAt')} style={{ position: 'sticky', top: 0, zIndex: 1000, backgroundColor: 'white', cursor: 'pointer', borderBottom: '2px solid #e0e0e0', boxShadow: '0 1px 0 #e0e0e0' }}>
                 Last Updated {sortConfig?.field === 'updatedAt' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
               </th>
-              <th style={{ position: 'sticky', top: 0, zIndex: 10, backgroundColor: 'white', cursor: 'default', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>Actions</th>
+              <th style={{ position: 'sticky', top: 0, zIndex: 1000, backgroundColor: 'white', cursor: 'default', borderBottom: '2px solid #e0e0e0', boxShadow: '0 1px 0 #e0e0e0' }}>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -355,21 +665,26 @@ export default function MappingManagement() {
                       >
                         <option value="">No Category</option>
                         {(() => {
-                          // 1. User's existing categories (Deduplicated by name)
-                          const rawUserCats = allCategories.filter(cat => cat.userId === mapping.userId)
-                          const userCats = Array.from(new Map(rawUserCats.map(item => [item.name.trim(), item])).values())
-                          // 2. System defaults not already in user's list (by name)
-                          const userCatNames = new Set(userCats.map(c => c.name.toLowerCase().trim()))
-                          const additionalDefaults = systemDefaults
-                            .filter(name => !userCatNames.has(name.toLowerCase().trim()))
-                            .map(name => ({
-                              id: `NEW:${name}`,
-                              name: name,
-                              userId: 'SYSTEM'
-                            }))
+                          const rawUserCats = allCategories.filter(cat => cat.userId === mapping.userId || cat.userId === currentUser?.uid)
 
-                          // Combine and Sort
-                          const combined = [...userCats, ...additionalDefaults]
+                          const userCats = Array.from(new Map(rawUserCats.map(item => [item.name.trim(), item])).values())
+                          const combined = [...userCats]
+
+                          // Add current default suggestion if not in list
+                          if (systemDefaults.length > 0) {
+                            // .. simplified for brevity in this fix, relying on raw logic
+                            // logic from previous component was good
+                            const userCatNames = new Set(userCats.map(c => c.name.toLowerCase().trim()))
+                            const additionalDefaults = systemDefaults
+                              .filter(name => !userCatNames.has(name.toLowerCase().trim()))
+                              .map(name => ({
+                                id: `NEW:${name}`,
+                                name: name,
+                                userId: 'SYSTEM'
+                              }))
+                            combined.push(...additionalDefaults)
+                          }
+
                           combined.sort((a, b) => a.name.localeCompare(b.name))
 
                           return combined.map(cat => (
@@ -387,7 +702,9 @@ export default function MappingManagement() {
                       )
                     )}
                   </td>
-                  <td>{mapping.userEmail || mapping.userId}</td>
+                  {isAdmin && (
+                    <td>{mapping.userEmail || mapping.userId}</td>
+                  )}
                   <td>{mapping.updatedAt.toLocaleDateString()}</td>
                   <td>
                     {editingId === mapping.id ? (
@@ -403,12 +720,41 @@ export default function MappingManagement() {
                         >
                           Edit
                         </button>
-                        <button
-                          onClick={() => deleteMapping(mapping.id)}
-                          className="btn-secondary btn-sm"
-                        >
-                          Delete
-                        </button>
+                        {isAdmin && mapping.userId !== 'SYSTEM' && (
+                          <button
+                            onClick={async () => {
+                              if (!confirm('Promote this mapping to System Default? It will apply to all users without their own override.')) return
+                              try {
+                                const ref = doc(db, 'transactionMappings', mapping.id)
+                                await updateDoc(ref, { userId: 'SYSTEM' })
+                                loadMappings()
+                              } catch (e) {
+                                console.error(e)
+                                alert("Failed to update mapping")
+                              }
+                            }}
+                            className="btn-primary btn-sm"
+                            title="Promote to System Default"
+                          >
+                            To System
+                          </button>
+                        )}
+                        {(isAdmin || mapping.userId !== 'SYSTEM') && (
+                          <button
+                            onClick={() => deleteMapping(mapping.id)}
+                            className="btn-secondary btn-sm"
+                            title={
+                              !isAdmin && systemRulesSet.has(mapping.originalDescription.toLowerCase().trim())
+                                ? "Remove your custom rule and use the System Default"
+                                : "Delete this rule permanently"
+                            }
+                          >
+                            {!isAdmin && systemRulesSet.has(mapping.originalDescription.toLowerCase().trim())
+                              ? "Revert to System"
+                              : "Delete"
+                            }
+                          </button>
+                        )}
                       </div>
                     )}
                   </td>
@@ -421,4 +767,3 @@ export default function MappingManagement() {
     </div >
   )
 }
-

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { collection, getDocs, doc, setDoc } from 'firebase/firestore'
+import { collection, getDocs, doc, setDoc, query, where, writeBatch } from 'firebase/firestore'
 import { db } from '../../config/firebase'
 import './Admin.css'
 
@@ -468,6 +468,99 @@ export default function SystemConfig() {
       </div>
 
 
+      <div className="config-card" style={{ marginTop: '2rem', border: '1px solid #ffcc80', backgroundColor: '#fff8e1' }}>
+        <h2>Migration Tool</h2>
+        <p>Promote a user's local settings to System Defaults. This is useful for bootstrapping the system.</p>
+        <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginTop: '1rem' }}>
+          <input
+            type="text"
+            placeholder="User Email (e.g. hein@speccon.co.za)"
+            id="migrationEmail"
+            defaultValue="hein@speccon.co.za"
+            className="form-input"
+          />
+          <button
+            className="btn-primary"
+            onClick={async () => {
+              const emailInput = (document.getElementById('migrationEmail') as HTMLInputElement).value
+              if (!emailInput) return;
+
+              if (!confirm(`Are you sure you want to promote mappings and categories from ${emailInput} to SYSTEM defaults? This affects all users.`)) return;
+
+              setLoading(true)
+              try {
+                // 1. Find User
+                const usersRef = collection(db, 'users')
+                const userSnap = await getDocs(query(usersRef, where('email', '==', emailInput.toLowerCase())))
+
+                if (userSnap.empty) {
+                  alert("User not found.")
+                  setLoading(false)
+                  return;
+                }
+
+                const sourceUserId = userSnap.docs[0].id
+
+                // 2. Promote Mappings (Update userId -> 'SYSTEM')
+                // Note: We'll set it to null or 'SYSTEM'. Admin page uses 'SYSTEM' check.
+                // Actually, let's keep it null if schema allows, or 'SYSTEM'.
+                // Code uses: data.userId || 'SYSTEM' in Admin, so 'SYSTEM' or null is fine.
+                // Let's use 'SYSTEM' explicitly.
+
+                const mappingsQ = query(collection(db, 'transactionMappings'), where('userId', '==', sourceUserId))
+                const mappingsSnap = await getDocs(mappingsQ)
+
+                const batch = writeBatch(db)
+                let mapCount = 0
+                mappingsSnap.forEach(doc => {
+                  batch.update(doc.ref, { userId: 'SYSTEM' })
+                  mapCount++
+                })
+
+                if (mapCount > 0) await batch.commit()
+
+                // 3. Promote Categories (Add to defaultCategories)
+                const budgetsQ = query(collection(db, 'budgets'), where('userId', '==', sourceUserId))
+                const budgetsSnap = await getDocs(budgetsQ)
+
+                const newCats = [...config.defaultCategories]
+                const existingNames = new Set(newCats.map(c => c.name.toLowerCase().trim()))
+                let catCount = 0
+
+                budgetsSnap.forEach(doc => {
+                  const d = doc.data() as any
+                  const name = (d.name || '').trim()
+                  if (name && !existingNames.has(name.toLowerCase())) {
+                    newCats.push({ name: name, type: d.type || 'monthly' })
+                    existingNames.add(name.toLowerCase())
+                    catCount++
+                  }
+                })
+
+                if (catCount > 0) {
+                  // Update local config state and let autosave or manual save handle it?
+                  // Better to save immediately to be safe
+                  await setDoc(doc(db, 'systemConfig', 'main'), {
+                    ...config,
+                    defaultCategories: newCats
+                  }, { merge: true })
+                  setConfig(prev => ({ ...prev, defaultCategories: newCats }))
+                }
+
+                alert(`Migration Complete!\nPromoted ${mapCount} mappings to System.\nAdded ${catCount} new categories to Defaults.`)
+
+              } catch (e: any) {
+                console.error("Migration failed", e)
+                alert("Migration failed: " + e.message)
+              } finally {
+                setLoading(false)
+              }
+            }}
+          >
+            Run Migration
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

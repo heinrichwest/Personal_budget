@@ -6,7 +6,7 @@ import {
   signOut,
   onAuthStateChanged,
 } from 'firebase/auth'
-import { doc, getDoc, setDoc } from 'firebase/firestore'
+import { doc, getDoc, setDoc, query, collection, where, getDocs } from 'firebase/firestore'
 import { auth, db } from '../config/firebase'
 
 interface UserRole {
@@ -47,11 +47,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const userSnap = await getDoc(userRef)
 
     if (!userSnap.exists()) {
-      // Check if this is the first user (system admin)
-      const isSystemAdmin = email === 'hein@speccon.co.za'
-      
+      // 1. Check for Pre-assigned Role
+      let assignedRole: 'user' | 'admin' | 'systemadmin' = 'user'
+
+      try {
+        const q = query(collection(db, 'role_assignments'), where('email', '==', email.toLowerCase()))
+        const snapshot = await getDocs(q)
+        if (!snapshot.empty) {
+          const assignment = snapshot.docs[0].data()
+          if (assignment.role) assignedRole = assignment.role
+        } else {
+          // 2. Fallback: Check hardcoded System Admin
+          if (email === 'hein@speccon.co.za') {
+            assignedRole = 'systemadmin'
+          }
+        }
+      } catch (e) {
+        console.error("Error checking role assignments", e)
+      }
+
       const userData: UserRole = {
-        role: isSystemAdmin ? 'systemadmin' : 'user',
+        role: assignedRole,
         email: email,
         displayName: displayName || email.split('@')[0],
         createdAt: new Date(),
@@ -121,4 +137,3 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }
-

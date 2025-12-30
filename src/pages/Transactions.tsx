@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { collection, query, where, getDocs, addDoc, updateDoc, orderBy, Timestamp, writeBatch, doc } from 'firebase/firestore'
+import { collection, query, where, getDocs, addDoc, updateDoc, Timestamp, writeBatch, doc } from 'firebase/firestore'
 import { db } from '../config/firebase'
 import { useAuth } from '../contexts/AuthContext'
 import Papa from 'papaparse'
@@ -26,12 +26,7 @@ interface Transaction {
 
 
 
-interface BankStatement {
-  id: string
-  fileName: string
-  uploadedAt: Date
-  transactionCount: number
-}
+
 
 // Helper to robustly parse dates (handling DD/MM/YYYY which JS often fails on vs MM/DD/YYYY)
 // Helper to robustly parse dates (handling DD/MM/YYYY which JS often fails on vs MM/DD/YYYY)
@@ -89,11 +84,8 @@ function parseRobustDate(dateInput: any): Date | null {
 export default function Transactions() {
   const { currentUser } = useAuth()
   const [transactions, setTransactions] = useState<Transaction[]>([])
-  const [statements, setStatements] = useState<BankStatement[]>([])
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
-  const [uploadProgress, setUploadProgress] = useState(0)
-  const [selectedStatement, setSelectedStatement] = useState<string | null>(null)
   const [showMapping, setShowMapping] = useState(false)
   const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null)
   const [searchTerm, setSearchTerm] = useState('')
@@ -101,7 +93,39 @@ export default function Transactions() {
   const [categoriesLoading, setCategoriesLoading] = useState(true)
   const [showUnmappedOnly, setShowUnmappedOnly] = useState(false)
   const [showAIReview, setShowAIReview] = useState(false)
+  // ... existing states ...
   const [sortConfig, setSortConfig] = useState<{ field: keyof Transaction, direction: 'asc' | 'desc' } | null>(null)
+
+  // Import Wizard State
+  const [importStep, setImportStep] = useState<'upload' | 'mapping' | 'validation'>('upload')
+  const [csvFile, setCsvFile] = useState<File | null>(null)
+  const [csvPreview, setCsvPreview] = useState<any[]>([])
+  const [csvHeaders, setCsvHeaders] = useState<string[]>([])
+  const [columnMapping, setColumnMapping] = useState<{
+    date: string
+    description: string
+    amount?: string
+    debit?: string
+    credit?: string
+    balance?: string // for future balance checks
+  }>({ date: '', description: '' })
+
+  // Validation State
+  const [importStats, setImportStats] = useState<{
+    count: number
+    minDate: Date | null
+    maxDate: Date | null
+    totalCredits: number
+    totalDebits: number
+    netChange: number
+    gapWarning?: string
+    balanceWarning?: string
+  } | null>(null)
+
+  const [balanceCheck, setBalanceCheck] = useState<{
+    opening: string // User input string
+    closing: string // User input string
+  }>({ opening: '', closing: '' })
 
   useEffect(() => {
     if (!currentUser) return
@@ -375,116 +399,227 @@ export default function Transactions() {
     }
   }
 
+
+
+
+
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file || !currentUser) return
 
     setUploading(true)
+    setCsvFile(file)
 
     try {
       const text = await file.text()
-      const result = Papa.parse(text, {
+      // First pass: Parse just enough to get headers and preview
+      Papa.parse(text, {
+        header: true,
+        preview: 5,
+        skipEmptyLines: true,
+        complete: (results) => {
+          if (results.meta.fields) {
+            setCsvHeaders(results.meta.fields)
+            setCsvPreview(results.data)
+
+            // Auto-guess mapping
+            const guess = {
+              date: results.meta.fields.find(h => h.toLowerCase().includes('date')) || '',
+              description: results.meta.fields.find(h => h.toLowerCase().includes('desc') || h.toLowerCase().includes('details')) || '',
+              amount: results.meta.fields.find(h => h.toLowerCase() === 'amount' || h.toLowerCase().includes('value')) || '',
+              debit: results.meta.fields.find(h => h.toLowerCase().includes('debit')) || '',
+              credit: results.meta.fields.find(h => h.toLowerCase().includes('credit')) || ''
+            }
+            setColumnMapping(guess)
+            setImportStep('mapping')
+          }
+          setUploading(false)
+        },
+        error: (err: any) => {
+          alert("Error parsing CSV: " + err.message)
+          setUploading(false)
+        }
+      })
+    } catch (error: any) {
+      console.error('Error reading file:', error)
+      alert('Failed to read file')
+      setUploading(false)
+    }
+
+    // Reset input so same file can be selected again if cancelled
+    e.target.value = ''
+  }
+
+  // Step 2 -> 3: Validate Data
+  async function processValidation() {
+    if (!csvFile || !currentUser) return
+    setUploading(true)
+
+    try {
+      const text = await csvFile.text()
+      Papa.parse(text, {
         header: true,
         skipEmptyLines: true,
+        complete: (results) => {
+          const rows = results.data as any[]
+          let totalDebits = 0
+          let totalCredits = 0
+          let minDate: Date | null = null
+          let maxDate: Date | null = null
+
+          // Parse all to get stats
+          const parsedRows = rows.map(row => {
+            // Extract using mapping
+            const dateStr = row[columnMapping.date || '']
+            const descStr = row[columnMapping.description || '']
+            let amount = 0
+
+            if (columnMapping.amount) {
+              // Single Amount Column
+              const val = parseFloat(String(row[columnMapping.amount]).replace(/[^\d.-]/g, ''))
+              if (!isNaN(val)) amount = val
+            } else {
+              // Debit/Credit Columns
+              let dr = 0, cr = 0
+              if (columnMapping.debit) dr = parseFloat(String(row[columnMapping.debit]).replace(/[^\d.-]/g, '')) || 0
+              if (columnMapping.credit) cr = parseFloat(String(row[columnMapping.credit]).replace(/[^\d.-]/g, '')) || 0
+              amount = Math.abs(cr) - Math.abs(dr) // Credit positive, Debit negative usually? 
+              // Wait, Personal finance apps usually treat Expenses (Debit) as negative?
+              // Let's stick to: Amount > 0 is Income, Amount < 0 is Expense?
+              // Or just store raw. Previous logic: abs(credit) - abs(debit).
+            }
+
+            const date = parseRobustDate(dateStr)
+            return { date, amount, desc: descStr, raw: row }
+          }).filter(r => r.date && r.desc)
+
+          if (parsedRows.length === 0) {
+            alert("No valid rows found based on mapping.")
+            setUploading(false)
+            return
+          }
+
+          parsedRows.forEach(r => {
+            if (!minDate || r.date! < minDate) minDate = r.date
+            if (!maxDate || r.date! > maxDate) maxDate = r.date
+
+            if (r.amount > 0) totalCredits += r.amount
+            else totalDebits += Math.abs(r.amount)
+          })
+
+          // Gap Analysis
+          let gapWarning = undefined
+          if (transactions.length > 0 && minDate) {
+            // transactions is sorted desc, so [0] is latest
+            const lastTxnDate = transactions[0].date
+            const importStart = minDate as Date
+
+            const diffTime = Math.abs(importStart.getTime() - lastTxnDate.getTime())
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24))
+
+            if (importStart > lastTxnDate && diffDays > 7) {
+              gapWarning = `Warning: There is a gap of ${diffDays} days between your last transaction (${format(lastTxnDate, 'yyyy-MM-dd')}) and the start of this import (${format(importStart, 'yyyy-MM-dd')}). You might be missing data.`
+            }
+            if (importStart <= lastTxnDate) {
+              gapWarning = `Note: The start of this import overlaps with existing data. Duplicates may occur if not careful.`
+            }
+          }
+
+          setImportStats({
+            count: parsedRows.length,
+            minDate,
+            maxDate,
+            totalDebits,
+            totalCredits,
+            netChange: totalCredits - totalDebits,
+            gapWarning
+          })
+          setImportStep('validation')
+          setUploading(false)
+        }
       })
+    } catch (e) {
+      console.error(e)
+      setUploading(false)
+    }
+  }
 
-      if (result.errors.length > 0) {
-        alert('Error parsing CSV file. Please check the format.')
-        return
-      }
+  // Step 3 -> Finish: Write to DB
+  async function finalizeImport() {
+    if (!csvFile || !currentUser) return
+    setUploading(true)
 
-      // Create bank statement record
-      const statementRef = await addDoc(collection(db, 'bankStatements'), {
-        userId: currentUser.uid,
-        fileName: file.name,
-        uploadedAt: new Date(),
-        transactionCount: result.data.length,
-      })
+    try {
+      const text = await csvFile.text()
+      const result = Papa.parse(text, { header: true, skipEmptyLines: true })
+      const rows = result.data as any[]
+      const transactionsToAdd: any[] = []
 
-      // 1. Pre-fetch all mappings
+      // Prepare Mappings
       const mappingSnapshot = await getDocs(collection(db, 'transactionMappings'))
-      const mappings: Array<{ rule: string; mappedDescription: string; categoryId: string }> = []
+
+      const systemMappingsMap = new Map<string, { rule: string; mappedDescription: string; categoryId: string }>()
+      const userMappingsMap = new Map<string, { rule: string; mappedDescription: string; categoryId: string }>()
 
       mappingSnapshot.forEach(doc => {
         const data = doc.data()
         if (data.originalDescription) {
-          mappings.push({
-            rule: normalizeMatchText(data.originalDescription), // Normalize the rule stored
+          const rule = normalizeMatchText(data.originalDescription)
+          const mappingObj = {
+            rule: rule,
             mappedDescription: data.mappedDescription,
             categoryId: data.categoryId
-          })
+          }
+
+          if (!data.userId || data.userId === 'SYSTEM') {
+            systemMappingsMap.set(rule, mappingObj)
+          } else if (data.userId === currentUser.uid) {
+            userMappingsMap.set(rule, mappingObj)
+          }
         }
       })
 
-      // Sort by length desc so specific rules match before generic ones
+      // Merge: User overrides System
+      // We start with system, then set user (overwrite)
+      const mergedMap = new Map(systemMappingsMap)
+      userMappingsMap.forEach((val, key) => mergedMap.set(key, val))
+
+      const mappings = Array.from(mergedMap.values())
       mappings.sort((a, b) => b.rule.length - a.rule.length)
 
-      // Process transactions
-      const transactionsToAdd: Omit<Transaction, 'id'>[] = []
+      // Create Statement Record
+      const statementRef = await addDoc(collection(db, 'bankStatements'), {
+        userId: currentUser.uid,
+        fileName: csvFile.name,
+        uploadedAt: new Date(),
+        transactionCount: rows.length,
+      })
 
-      for (const row of result.data as any[]) {
-        const keys = Object.keys(row)
-        const normalize = (k: string) => k.trim().toLowerCase()
-
-        // robust key finding
-        const dateKey = keys.find(k => normalize(k) === 'date') || keys.find(k => normalize(k).includes('date'))
-        const descKey = keys.find(k => normalize(k).startsWith('description')) || keys.find(k => normalize(k).includes('details'))
-        const debitsKey = keys.find(k => normalize(k) === 'debits') || keys.find(k => normalize(k).includes('debit'))
-        const creditsKey = keys.find(k => normalize(k) === 'credits') || keys.find(k => normalize(k).includes('credit'))
-
-        if (!dateKey || !descKey || (!debitsKey && !creditsKey)) {
-          // ensure we skip completely empty rows or summary rows
-          if (!dateKey && !descKey) continue
-
-          if (!dateKey || !descKey) {
-            console.warn('Skipping row - missing necessary columns:', row)
-            continue
-          }
+      for (const row of rows) {
+        const dateStr = row[columnMapping.date || '']
+        const descStr = row[columnMapping.description || '']
+        let amount = 0
+        if (columnMapping.amount) {
+          const val = parseFloat(String(row[columnMapping.amount]).replace(/[^\d.-]/g, ''))
+          if (!isNaN(val)) amount = val
+        } else {
+          let dr = 0, cr = 0
+          if (columnMapping.debit) dr = parseFloat(String(row[columnMapping.debit]).replace(/[^\d.-]/g, '')) || 0
+          if (columnMapping.credit) cr = parseFloat(String(row[columnMapping.credit]).replace(/[^\d.-]/g, '')) || 0
+          amount = Math.abs(cr) - Math.abs(dr)
         }
 
-        const dateStr = row[dateKey!]
-        const descStr = row[descKey!]
+        const date = parseRobustDate(dateStr)
+        if (!date || !descStr) continue
 
-        // Parse numbers
-        let debitVal = 0
-        let creditVal = 0
-
-        if (debitsKey && row[debitsKey]) {
-          debitVal = parseFloat(String(row[debitsKey]).replace(/[^\d.-]/g, ''))
-        }
-        if (creditsKey && row[creditsKey]) {
-          creditVal = parseFloat(String(row[creditsKey]).replace(/[^\d.-]/g, ''))
-        }
-
-        if (isNaN(debitVal) && isNaN(creditVal)) continue
-
-        const amount = (Math.abs(creditVal || 0) - Math.abs(debitVal || 0))
-
-        let date = parseRobustDate(dateStr)
-        const description = String(descStr || '').trim()
-
-        if (!date || isNaN(date.getTime()) || !description) {
-          console.warn(`Skipping invalid row: Date='${dateStr}', Desc='${description}'`)
-          continue
-        }
-
-        // 2. Rule-based lookup 
-        let mappedDescription = description
+        // Mapping Logic
+        let mappedDescription = descStr
         let categoryId: string | undefined
+        const normalizedDesc = normalizeMatchText(descStr)
 
-        const normalizedDesc = normalizeMatchText(description)
-
-        // Priority 1: Exact Match (Case-insensitive)
-        let exactMatch = mappings.find(m => normalizedDesc === m.rule.toLowerCase())
-
-        // Priority 2: Partial Match (Contains) - Only if no exact match
-        let match = exactMatch
-        if (!match) {
-          match = mappings.find(m => normalizedDesc.includes(m.rule))
-        }
-
+        let match = mappings.find(m => normalizedDesc === m.rule.toLowerCase()) || mappings.find(m => normalizedDesc.includes(m.rule))
         if (match) {
-          mappedDescription = match.mappedDescription || description
+          mappedDescription = match.mappedDescription || descStr
           categoryId = match.categoryId
         }
 
@@ -494,70 +629,48 @@ export default function Transactions() {
           if (categoryId.startsWith('NEW:')) {
             categoryName = categoryId.substring(4)
           } else {
-            // Look up in loaded categories
             const cat = categories.find(c => c.id === categoryId)
-            if (cat) {
-              categoryName = cat.name
-            }
+            if (cat) categoryName = cat.name
           }
         }
 
-        // Construct object specifically to avoid undefined values which Firestore rejects
-        const newTrans: any = {
+        transactionsToAdd.push({
           date,
-          description,
+          description: descStr,
           amount,
           mappedDescription,
           userId: currentUser.uid,
           bankStatementId: statementRef.id,
-        }
-
-        // Only add categoryId if it exists (is not undefined/null/empty)
-        if (categoryId) {
-          newTrans.categoryId = categoryId
-          if (categoryName) {
-            newTrans.categoryName = categoryName
-          }
-        }
-
-        transactionsToAdd.push(newTrans)
+          categoryId: categoryId || null,
+          categoryName: categoryName || null
+        })
       }
 
-      if (transactionsToAdd.length === 0) {
-        throw new Error('No valid transactions found in the file. Please check column headers (Date, Description, Debits, Credits).')
-      }
-
-      // Batch add transactions (max 500 per batch)
+      // Batch Write
       const batchSize = 500
-      const total = transactionsToAdd.length
-      let processed = 0
-
-      for (let i = 0; i < total; i += batchSize) {
+      for (let i = 0; i < transactionsToAdd.length; i += batchSize) {
         const batch = writeBatch(db)
-        const chunk = transactionsToAdd.slice(i, i + batchSize)
-
-        chunk.forEach((trans) => {
-          const newDocRef = doc(collection(db, 'transactions'))
-          batch.set(newDocRef, {
-            ...trans,
-            date: Timestamp.fromDate(trans.date),
+        transactionsToAdd.slice(i, i + batchSize).forEach(t => {
+          batch.set(doc(collection(db, 'transactions')), {
+            ...t,
+            date: Timestamp.fromDate(t.date)
           })
         })
-
         await batch.commit()
-        processed += chunk.length
-        setUploadProgress(Math.round((processed / total) * 100))
       }
 
-      alert(`Successfully imported ${transactionsToAdd.length} transactions`)
+      alert(`Successfully imported ${transactionsToAdd.length} transactions.`)
+      setImportStep('upload')
+      setCsvFile(null)
+      setImportStats(null)
+      setBalanceCheck({ opening: '', closing: '' })
       loadTransactions()
-    } catch (error: any) {
-      console.error('Error uploading file:', error)
-      alert(`Failed to upload file: ${error.message || 'Unknown error'}`)
+
+    } catch (e: any) {
+      console.error(e)
+      alert("Import failed: " + e.message)
     } finally {
       setUploading(false)
-      setUploadProgress(0)
-      e.target.value = ''
     }
   }
 
@@ -602,7 +715,6 @@ export default function Transactions() {
       }
 
       setTransactions([])
-      setStatements([])
       alert("All data cleared successfully.")
     } catch (error) {
       console.error("Error clearing data:", error)
@@ -656,19 +768,23 @@ export default function Transactions() {
 
       // 2. Create/Update the persistent rule (OPTIONAL)
       if (saveRule) {
+        // Search specifically for a rule OWNED by this user
         const mappingQuery = query(
           collection(db, 'transactionMappings'),
-          where('originalDescription', '==', matchRule)
+          where('originalDescription', '==', matchRule),
+          where('userId', '==', currentUser.uid)
         )
         const mappingSnapshot = await getDocs(mappingQuery)
 
         if (!mappingSnapshot.empty) {
+          // Update existing personal rule
           await updateDoc(mappingSnapshot.docs[0].ref, {
             mappedDescription: mappedDesc,
             categoryId: finalCategoryId,
             updatedAt: new Date(),
           })
         } else {
+          // Create NEW personal rule (shadows any system rule)
           await addDoc(collection(db, 'transactionMappings'), {
             originalDescription: matchRule,
             mappedDescription: mappedDesc,
@@ -910,37 +1026,195 @@ export default function Transactions() {
 
   return (
     <div className="container">
-      <div className="transactions-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <div>
-          <h1>Transactions</h1>
-          <p>Upload bank statements and map transactions to budget categories</p>
-          <div style={{ fontSize: '0.85rem', color: '#666', marginTop: '0.5rem', backgroundColor: '#e3f2fd', padding: '0.5rem', borderRadius: '4px', border: '1px solid #bbdefb' }}>
-            ℹ️ CSV must include columns for <strong>Date</strong>, <strong>Description</strong>, and <strong>Amount</strong> (or Debits/Credits).
+
+
+      {/* IMPORT WIZARD UI */}
+      {importStep === 'mapping' && (
+        <div className="import-wizard" style={{ backgroundColor: 'white', padding: '1.5rem', borderRadius: '8px', boxShadow: '0 2px 10px rgba(0,0,0,0.1)', marginBottom: '2rem' }}>
+          <h2>Step 1: Map Columns</h2>
+          <p>Please select which columns in your CSV correspond to the required fields.</p>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+            <div className="form-group">
+              <label>Date Column</label>
+              <select className="form-select" value={columnMapping.date} onChange={e => setColumnMapping({ ...columnMapping, date: e.target.value })}>
+                <option value="">-- Select --</option>
+                {csvHeaders.map(h => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </div>
+            <div className="form-group">
+              <label>Description Column</label>
+              <select className="form-select" value={columnMapping.description} onChange={e => setColumnMapping({ ...columnMapping, description: e.target.value })}>
+                <option value="">-- Select --</option>
+                {csvHeaders.map(h => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div style={{ padding: '1rem', backgroundColor: '#f5f5f5', borderRadius: '4px', marginBottom: '1rem' }}>
+            <h4>Amount Mapping</h4>
+            <p style={{ fontSize: '0.9rem', color: '#666' }}>Do you have a single Amount column (positive/negative) OR separate Debit/Credit columns?</p>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginTop: '0.5rem' }}>
+              <div className="form-group">
+                <label>Amount Column (Signed)</label>
+                <select className="form-select" value={columnMapping.amount || ''} onChange={e => setColumnMapping({ ...columnMapping, amount: e.target.value, debit: '', credit: '' })}>
+                  <option value="">-- None --</option>
+                  {csvHeaders.map(h => <option key={h} value={h}>{h}</option>)}
+                </select>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>OR</div>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <div className="form-group">
+                  <label>Debit Column</label>
+                  <select className="form-select" value={columnMapping.debit || ''} onChange={e => setColumnMapping({ ...columnMapping, debit: e.target.value, amount: '' })}>
+                    <option value="">-- None --</option>
+                    {csvHeaders.map(h => <option key={h} value={h}>{h}</option>)}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label>Credit Column</label>
+                  <select className="form-select" value={columnMapping.credit || ''} onChange={e => setColumnMapping({ ...columnMapping, credit: e.target.value, amount: '' })}>
+                    <option value="">-- None --</option>
+                    {csvHeaders.map(h => <option key={h} value={h}>{h}</option>)}
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <h3>Preview (First 5 rows)</h3>
+          <div style={{ overflowX: 'auto', marginBottom: '1.5rem' }}>
+            <table style={{ width: '100%', fontSize: '0.8rem', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr>
+                  {csvHeaders.map(h => <th key={h} style={{ borderBottom: '1px solid #ccc', padding: '4px', textAlign: 'left', background: '#eee' }}>{h}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {csvPreview.slice(0, 5).map((row, i) => (
+                  <tr key={i}>
+                    {csvHeaders.map(h => <td key={h} style={{ borderBottom: '1px solid #eee', padding: '4px' }}>{row[h]}</td>)}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="form-actions">
+            <button className="btn-primary" onClick={processValidation} disabled={!columnMapping.date || !columnMapping.description || (!columnMapping.amount && (!columnMapping.debit && !columnMapping.credit))}>
+              Next: verify Data →
+            </button>
+            <button className="btn-outline" onClick={() => { setImportStep('upload'); setCsvFile(null); }}>Cancel</button>
           </div>
         </div>
-        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', marginTop: '0.5rem' }}>
-          <button
-            onClick={handleClearData}
-            className="btn-outline"
-            disabled={uploading || transactions.length === 0}
-            style={{ color: '#d32f2f', borderColor: '#d32f2f' }}
-          >
-            Clear Data
-          </button>
-          <label className="file-upload-label" style={{ margin: 0 }}>
-            <input
-              type="file"
-              accept=".csv"
-              onChange={handleFileUpload}
-              disabled={uploading || categoriesLoading}
-              style={{ display: 'none' }}
-            />
-            <span className={`btn-primary ${categoriesLoading ? 'disabled' : ''}`}>
-              {uploading ? 'Uploading...' : categoriesLoading ? 'Loading System...' : 'Upload CSV'}
-            </span>
-          </label>
+      )}
+
+      {importStep === 'validation' && importStats && (
+        <div className="import-wizard" style={{ backgroundColor: 'white', padding: '1.5rem', borderRadius: '8px', boxShadow: '0 2px 10px rgba(0,0,0,0.1)', marginBottom: '2rem' }}>
+          <h2>Step 2: Verify Import</h2>
+
+          <div className="stats-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem', marginBottom: '1rem' }}>
+            <div className="stat-box">
+              <label>Transactions</label>
+              <div>{importStats.count}</div>
+            </div>
+            <div className="stat-box">
+              <label>Date Range</label>
+              <div>
+                {importStats.minDate && format(importStats.minDate, 'dd MMM')} - {importStats.maxDate && format(importStats.maxDate, 'dd MMM yyyy')}
+              </div>
+            </div>
+            <div className="stat-box">
+              <label>Total Credits</label>
+              <div style={{ color: 'green' }}>{importStats.totalCredits.toFixed(2)}</div>
+            </div>
+            <div className="stat-box">
+              <label>Total Debits (Exp)</label>
+              <div style={{ color: 'red' }}>{importStats.totalDebits.toFixed(2)}</div>
+            </div>
+          </div>
+
+          {importStats.gapWarning && (
+            <div style={{ padding: '1rem', backgroundColor: '#fff3e0', borderLeft: '4px solid #ff9800', marginBottom: '1rem', color: '#e65100' }}>
+              <strong>⚠️ Analysis:</strong> {importStats.gapWarning}
+            </div>
+          )}
+          {!importStats.gapWarning && (
+            <div style={{ padding: '1rem', backgroundColor: '#e8f5e9', borderLeft: '4px solid #4caf50', marginBottom: '1rem', color: '#2e7d32' }}>
+              ✅ <strong>Analysis:</strong> Data continuity looks good. No major gaps detected from previous transactions.
+            </div>
+          )}
+
+          <div style={{ padding: '1rem', backgroundColor: '#f8f9fa', borderRadius: '4px', marginBottom: '1.5rem', border: '1px solid #dee2e6' }}>
+            <h4>Balance Check (Optional)</h4>
+            <p style={{ fontSize: '0.9rem', marginBottom: '10px' }}>Enter the statement balances to verify accuracy.</p>
+            <div style={{ display: 'flex', gap: '1rem', alignItems: 'flex-end' }}>
+              <div className="form-group">
+                <label>Opening Balance</label>
+                <input type="number" className="form-input" placeholder="0.00" value={balanceCheck.opening} onChange={e => setBalanceCheck({ ...balanceCheck, opening: e.target.value })} />
+              </div>
+              <div style={{ paddingBottom: '10px', fontWeight: 'bold' }}>+ Net ({importStats.netChange.toFixed(2)}) =</div>
+              <div className="form-group">
+                <label>Calculated Closing</label>
+                <input type="text" className="form-input" disabled value={(parseFloat(balanceCheck.opening || '0') + importStats.netChange).toFixed(2)} />
+              </div>
+              <div className="form-group">
+                <label>Statement Closing</label>
+                <input type="number" className="form-input" placeholder="0.00" value={balanceCheck.closing} onChange={e => setBalanceCheck({ ...balanceCheck, closing: e.target.value })} />
+              </div>
+            </div>
+            {balanceCheck.closing && (
+              <div style={{ marginTop: '0.5rem', fontWeight: 'bold', color: Math.abs((parseFloat(balanceCheck.opening || '0') + importStats.netChange) - parseFloat(balanceCheck.closing)).toFixed(2) === '0.00' ? 'green' : 'red' }}>
+                Difference: {((parseFloat(balanceCheck.opening || '0') + importStats.netChange) - parseFloat(balanceCheck.closing)).toFixed(2)}
+              </div>
+            )}
+          </div>
+
+          <div className="form-actions">
+            <button className="btn-primary" onClick={finalizeImport} disabled={uploading}>
+              {uploading ? 'Importing...' : '✅ Confirm Import'}
+            </button>
+            <button className="btn-outline" onClick={() => setImportStep('mapping')}>Back</button>
+          </div>
         </div>
-      </div>
+      )}
+
+
+      {/* DEFAULT HEADER (Only show if NOT in wizard mode) */}
+      {importStep === 'upload' && (
+        <div className="transactions-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <h1>Transactions</h1>
+            <p>Upload bank statements and map transactions to budget categories</p>
+            <div style={{ fontSize: '0.85rem', color: '#666', marginTop: '0.5rem', backgroundColor: '#e3f2fd', padding: '0.5rem', borderRadius: '4px', border: '1px solid #bbdefb' }}>
+              ℹ️ CSV must include columns for <strong>Date</strong>, <strong>Description</strong>, and <strong>Amount</strong> (or Debits/Credits).
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', marginTop: '0.5rem' }}>
+            <button
+              onClick={handleClearData}
+              className="btn-outline"
+              disabled={uploading || transactions.length === 0}
+              style={{ color: '#d32f2f', borderColor: '#d32f2f' }}
+            >
+              Clear Data
+            </button>
+            <label className="file-upload-label" style={{ margin: 0 }}>
+              <input
+                type="file"
+                accept=".csv"
+                onChange={handleFileUpload}
+                disabled={uploading || categoriesLoading}
+                style={{ display: 'none' }}
+              />
+              <span className={`btn-primary ${categoriesLoading ? 'disabled' : ''}`}>
+                {uploading ? 'Reading...' : categoriesLoading ? 'Loading System...' : 'Upload CSV'}
+              </span>
+            </label>
+          </div>
+        </div>
+      )}
 
       {transactions.length > 0 && (
         <div className="stats-cards" style={{ display: 'flex', gap: '1rem', marginBottom: '2rem' }}>

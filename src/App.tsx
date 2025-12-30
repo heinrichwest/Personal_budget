@@ -39,6 +39,11 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
+function NavigateToHome() {
+  const { isSystemAdmin } = useAuth()
+  return <Navigate to={isSystemAdmin ? "/admin" : "/dashboard"} replace />
+}
+
 function AppRoutes() {
   return (
     <Routes>
@@ -52,7 +57,7 @@ function AppRoutes() {
           </PrivateRoute>
         }
       >
-        <Route index element={<Navigate to="/dashboard" replace />} />
+        <Route index element={<NavigateToHome />} />
         <Route path="dashboard" element={<Dashboard />} />
         <Route path="budget" element={<Budget />} />
         <Route path="transactions" element={<Transactions />} />
@@ -88,6 +93,7 @@ function AppRoutes() {
             </AdminRoute>
           }
         />
+        <Route path="mappings" element={<MappingManagement />} />
       </Route>
     </Routes>
   )

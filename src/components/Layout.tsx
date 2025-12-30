@@ -3,7 +3,7 @@ import { useAuth } from '../contexts/AuthContext'
 import './Layout.css'
 
 export default function Layout() {
-  const { currentUser, userRole, logout, isAdmin } = useAuth()
+  const { currentUser, userRole, logout, isAdmin, isSystemAdmin } = useAuth()
   const navigate = useNavigate()
 
   const handleLogout = async () => {
@@ -20,9 +20,14 @@ export default function Layout() {
             <span className="brand-subtitle">SpecCon Holdings</span>
           </div>
           <div className="nav-links">
-            <Link to="/dashboard">Dashboard</Link>
-            <Link to="/budget">Budget</Link>
-            <Link to="/transactions">Transactions</Link>
+            {!isSystemAdmin && (
+              <>
+                <Link to="/dashboard">Dashboard</Link>
+                <Link to="/budget">Budget</Link>
+                <Link to="/transactions">Transactions</Link>
+              </>
+            )}
+            <Link to="/mappings">Mappings</Link>
             {isAdmin && (
               <Link to="/admin">Admin</Link>
             )}

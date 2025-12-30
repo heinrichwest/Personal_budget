@@ -55,8 +55,11 @@
 
 .nav-user {
   display: flex;
-  align-items: center;
   gap: 1rem;
+}
+
+.nav-user .btn-outline {
+  cursor: pointer;
 }
 
 .user-email {
@@ -97,4 +100,3 @@
     justify-content: space-between;
   }
 }
-
