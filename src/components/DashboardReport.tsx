@@ -708,22 +708,34 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
         if (!editingTxn) return
 
         try {
-            // Simple update of description, category, and reporting month
-            await updateDoc(doc(db, 'transactions', editingTxn.id), {
-                description: editingTxn.description, // User might not have changed this if using mappedDesc
-                mappedDescription: editingTxn.mappedDescription,
-                categoryId: editingTxn.categoryId,
-                categoryName: editingTxn.categoryName,
-                reportingMonth: editingTxn.reportingMonth
-            })
+            // Build update object, only including defined values
+            const updateData: Record<string, any> = {}
+
+            if (editingTxn.description !== undefined) {
+                updateData.description = editingTxn.description
+            }
+            if (editingTxn.mappedDescription !== undefined) {
+                updateData.mappedDescription = editingTxn.mappedDescription
+            }
+            if (editingTxn.categoryId !== undefined) {
+                updateData.categoryId = editingTxn.categoryId || null
+            }
+            if (editingTxn.categoryName !== undefined) {
+                updateData.categoryName = editingTxn.categoryName || null
+            }
+            if (editingTxn.reportingMonth) {
+                updateData.reportingMonth = editingTxn.reportingMonth
+            }
+
+            await updateDoc(doc(db, 'transactions', editingTxn.id), updateData)
 
             // Close modals and reload
             setEditingTxn(null)
             setSelectedCell(null)
             generateReport()
-        } catch (err) {
-            console.error(err)
-            alert("Failed to update transaction")
+        } catch (err: any) {
+            console.error('Failed to update transaction:', err)
+            alert(`Failed to update transaction: ${err.message || 'Unknown error'}`)
         }
     }
 
