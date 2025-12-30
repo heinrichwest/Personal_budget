@@ -14,6 +14,7 @@ interface UserRole {
   email: string
   displayName?: string
   createdAt: Date
+  mustChangePassword?: boolean
 }
 
 interface AuthContextType {
@@ -21,10 +22,12 @@ interface AuthContextType {
   userRole: UserRole | null
   isAdmin: boolean
   isSystemAdmin: boolean
+  mustChangePassword: boolean
   loading: boolean
   login: (email: string, password: string) => Promise<void>
   register: (email: string, password: string, displayName?: string) => Promise<void>
   logout: () => Promise<void>
+  clearPasswordChangeFlag: () => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
@@ -99,6 +102,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUserRole(null)
   }
 
+  async function clearPasswordChangeFlag() {
+    if (!currentUser) return
+    const userRef = doc(db, 'users', currentUser.uid)
+    await setDoc(userRef, { mustChangePassword: false }, { merge: true })
+    setUserRole(prev => prev ? { ...prev, mustChangePassword: false } : null)
+  }
+
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setCurrentUser(user)
@@ -129,10 +139,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     userRole,
     isAdmin: userRole?.role === 'admin' || userRole?.role === 'systemadmin',
     isSystemAdmin: userRole?.role === 'systemadmin',
+    mustChangePassword: userRole?.mustChangePassword === true,
     loading,
     login,
     register,
     logout,
+    clearPasswordChangeFlag,
   }
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

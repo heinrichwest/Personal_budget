@@ -13,7 +13,9 @@
       "Bash(firebase use:*)",
       "Bash(firebase auth:export:*)",
       "Bash(where:*)",
-      "Bash(npm run build:*)"
+      "Bash(npm run build:*)",
+      "Bash(node scripts/updateLynnePassword.mjs:*)",
+      "Bash(npx tsc:*)"
     ],
     "deny": [],
     "ask": []

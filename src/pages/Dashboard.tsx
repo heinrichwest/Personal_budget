@@ -4,16 +4,19 @@ import { getDoc, doc, updateDoc } from 'firebase/firestore'
 import { db } from '../config/firebase'
 import { useAuth } from '../contexts/AuthContext'
 import DashboardReport from '../components/DashboardReport'
+import HighLevelAnalysis from '../components/HighLevelAnalysis'
+import CategoryDetailAnalysis from '../components/CategoryDetailAnalysis'
 import './Dashboard.css'
 
-
+type TabType = 'high-level' | 'mtm' | 'detail'
 
 export default function Dashboard() {
-  const { currentUser } = useAuth()
+  const { currentUser, isAdmin } = useAuth()
 
   const [loading, setLoading] = useState(true)
   const [monthStartDay, setMonthStartDay] = useState(1)
   const [showSettings, setShowSettings] = useState(false)
+  const [activeTab, setActiveTab] = useState<TabType>('high-level')
 
   useEffect(() => {
     if (!currentUser) return
@@ -61,20 +64,19 @@ export default function Dashboard() {
 
   return (
     <div className="dashboard-container">
-      <div className="dashboard-header">
-        <div>
-          <h1>Dashboard</h1>
-          <p>Overview of your budget and spending</p>
+      {/* Settings Button - Only for admins */}
+      {isAdmin && (
+        <div className="dashboard-settings-toggle">
+          <button
+            className="btn-outline btn-sm"
+            onClick={() => setShowSettings(!showSettings)}
+          >
+            Settings
+          </button>
         </div>
-        <button
-          className="btn-outline btn-sm"
-          onClick={() => setShowSettings(!showSettings)}
-        >
-          ⚙️ Settings
-        </button>
-      </div>
+      )}
 
-      {showSettings && (
+      {isAdmin && showSettings && (
         <div className="dashboard-settings-panel">
           <h3>Dashboard Settings</h3>
           <div className="form-group">
@@ -107,11 +109,40 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* Tab Navigation */}
+      <div className="dashboard-tabs">
+        <button
+          className={`tab-button ${activeTab === 'high-level' ? 'active' : ''}`}
+          onClick={() => setActiveTab('high-level')}
+        >
+          High Level Analysis
+        </button>
+        <button
+          className={`tab-button ${activeTab === 'mtm' ? 'active' : ''}`}
+          onClick={() => setActiveTab('mtm')}
+        >
+          MtM Analysis per Category
+        </button>
+        <button
+          className={`tab-button ${activeTab === 'detail' ? 'active' : ''}`}
+          onClick={() => setActiveTab('detail')}
+        >
+          Detail Analysis on a Category
+        </button>
+      </div>
 
-
-
-
-      <DashboardReport currentUser={currentUser} monthStartDay={monthStartDay} />
+      {/* Tab Content */}
+      <div className="tab-content">
+        {activeTab === 'high-level' && (
+          <HighLevelAnalysis currentUser={currentUser} monthStartDay={monthStartDay} />
+        )}
+        {activeTab === 'mtm' && (
+          <DashboardReport currentUser={currentUser} monthStartDay={monthStartDay} />
+        )}
+        {activeTab === 'detail' && (
+          <CategoryDetailAnalysis currentUser={currentUser} monthStartDay={monthStartDay} />
+        )}
+      </div>
     </div>
   )
 }

@@ -156,3 +156,59 @@
   padding: 3rem;
   color: #666;
 }
+
+/* Dashboard Settings Toggle */
+.dashboard-settings-toggle {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 1rem;
+}
+
+/* Tab Navigation */
+.dashboard-tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 0;
+  border-bottom: 2px solid #e1e4e8;
+  background-color: white;
+  border-radius: 8px 8px 0 0;
+  padding: 0 1rem;
+}
+
+.tab-button {
+  padding: 1rem 1.5rem;
+  border: none;
+  background: none;
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: #666;
+  cursor: pointer;
+  position: relative;
+  transition: color 0.2s ease;
+}
+
+.tab-button:hover {
+  color: var(--color-primary);
+}
+
+.tab-button.active {
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+.tab-button.active::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background-color: var(--color-primary);
+}
+
+/* Tab Content */
+.tab-content {
+  background-color: white;
+  border-radius: 0 0 8px 8px;
+  min-height: 400px;
+}

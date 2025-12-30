@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import Login from './pages/Login'
@@ -13,15 +14,30 @@ import MappingManagement from './pages/admin/MappingManagement'
 import Tables from './pages/admin/Tables'
 import HowItWorks from './pages/HowItWorks'
 import Layout from './components/Layout'
+import PasswordChangeModal from './components/PasswordChangeModal'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
-  const { currentUser, loading } = useAuth()
+  const { currentUser, loading, mustChangePassword } = useAuth()
+  const [passwordChanged, setPasswordChanged] = useState(false)
 
   if (loading) {
     return <div className="container" style={{ padding: '2rem', textAlign: 'center' }}>Loading...</div>
   }
 
-  return currentUser ? <>{children}</> : <Navigate to="/login" />
+  if (!currentUser) {
+    return <Navigate to="/login" />
+  }
+
+  // Show password change modal if user must change password
+  if (mustChangePassword && !passwordChanged) {
+    return (
+      <>
+        <PasswordChangeModal onSuccess={() => setPasswordChanged(true)} />
+      </>
+    )
+  }
+
+  return <>{children}</>
 }
 
 function AdminRoute({ children }: { children: React.ReactNode }) {
