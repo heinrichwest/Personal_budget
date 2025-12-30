@@ -3,7 +3,8 @@ import { AuthProvider, useAuth } from './contexts/AuthContext'
 import Login from './pages/Login'
 import Register from './pages/Register'
 import Dashboard from './pages/Dashboard'
-import Budget from './pages/Budget'
+// Budget page removed - budgets are now edited directly on Dashboard
+// import Budget from './pages/Budget'
 import Transactions from './pages/Transactions'
 import AdminDashboard from './pages/admin/AdminDashboard'
 import UserManagement from './pages/admin/UserManagement'
@@ -61,7 +62,6 @@ function AppRoutes() {
       >
         <Route index element={<NavigateToHome />} />
         <Route path="dashboard" element={<Dashboard />} />
-        <Route path="budget" element={<Budget />} />
         <Route path="transactions" element={<Transactions />} />
         <Route
           path="admin"

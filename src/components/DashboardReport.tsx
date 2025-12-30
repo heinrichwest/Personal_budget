@@ -752,14 +752,20 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
             // Deep copy structure we intend to mutate
             const newReportData = { ...reportData }
             const newSections = { ...newReportData.sections }
+            const newBudgetTotals = { ...newReportData.budgetTotals }
 
             let found = false
+            let isIncomeSection = false
             for (const unionId of Object.keys(newSections)) {
                 // Find section containing this row
                 const section = newSections[unionId]
                 const rowIndex = section.rows.findIndex(r => r.id === rowId)
 
                 if (rowIndex !== -1) {
+                    // Check if this is an income section by looking at the grouping
+                    const grouping = reportData.groupings.find(g => g.id === unionId)
+                    isIncomeSection = grouping?.isIncome ?? false
+
                     // Create new reference for section to trigger re-render
                     const newSection = {
                         ...section,
@@ -778,6 +784,13 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                     // Update Section Total
                     newSection.totalBudget += diff
 
+                    // Update overall budget totals
+                    if (isIncomeSection) {
+                        newBudgetTotals.income += diff
+                    } else {
+                        newBudgetTotals.expenses += diff
+                    }
+
                     newSections[unionId] = newSection
                     found = true
                     break
@@ -786,6 +799,7 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
 
             if (found) {
                 newReportData.sections = newSections
+                newReportData.budgetTotals = newBudgetTotals
                 setReportData(newReportData)
             }
 
@@ -885,13 +899,13 @@ export default function DashboardReport({ currentUser, monthStartDay }: ReportPr
                                                 <td className="sticky-col first-col" style={{ paddingLeft: '1.5rem' }}>{row.name}</td>
                                                 <td className="sticky-col second-col num-col budget-cell">
                                                     <input
+                                                        key={`budget-${row.id}-${row.budget}`}
                                                         type="text"
-                                                        defaultValue={row.budget === 0 ? '' : Math.round(row.budget).toLocaleString('en-ZA').replace(/,/g, ' ')} // Display with space separators
+                                                        defaultValue={row.budget === 0 ? '' : Math.round(row.budget).toLocaleString('en-ZA').replace(/,/g, ' ')}
                                                         className="budget-input"
                                                         placeholder="0"
                                                         onKeyDown={(e) => {
                                                             if (e.key === 'Enter') {
-                                                                // Strip spaces before parsing
                                                                 const cleanVal = e.currentTarget.value.replace(/\s/g, '').replace(/,/g, '')
                                                                 handleBudgetUpdate(row.id, cleanVal)
                                                                 e.currentTarget.blur()

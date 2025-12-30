@@ -23,7 +23,6 @@ export default function Layout() {
             {!isSystemAdmin && (
               <>
                 <Link to="/dashboard">Dashboard</Link>
-                <Link to="/budget">Budget</Link>
                 <Link to="/transactions">Transactions</Link>
               </>
             )}
