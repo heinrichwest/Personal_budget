@@ -95,6 +95,72 @@ service cloud.firestore {
       allow read: if isAuthenticated();
       allow write: if isSystemAdmin();
     }
+
+    // --- My Life Modules ---
+
+    // Life Details
+    match /lifeDetails/{detailId} {
+      allow read: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid);
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && isOwner(resource.data.userId);
+      allow delete: if isAuthenticated() && isOwner(resource.data.userId);
+    }
+
+    // Documents (Metadata)
+    match /documents/{docId} {
+      allow read: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid);
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && isOwner(resource.data.userId);
+      allow delete: if isAuthenticated() && isOwner(resource.data.userId);
+    }
+
+    // Fleet
+    match /fleet/{vehicleId} {
+      allow read: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid);
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && isOwner(resource.data.userId);
+      allow delete: if isAuthenticated() && isOwner(resource.data.userId);
+    }
+    
+    // Assets
+    match /assets/{assetId} {
+        allow read: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid);
+        allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+        allow update: if isAuthenticated() && isOwner(resource.data.userId);
+        allow delete: if isAuthenticated() && isOwner(resource.data.userId);
+    }
+
+    // Family Members
+    match /familyMembers/{memberId} {
+        allow read: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid);
+        allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+        allow update: if isAuthenticated() && isOwner(resource.data.userId);
+        allow delete: if isAuthenticated() && isOwner(resource.data.userId);
+    }
+
+    // Sickness Logs
+    match /sicknessLogs/{logId} {
+        allow read: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid);
+        allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+        allow update: if isAuthenticated() && isOwner(resource.data.userId);
+        allow delete: if isAuthenticated() && isOwner(resource.data.userId);
+    }
+
+    // Medical Operations
+    match /medicalOperations/{opId} {
+        allow read: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid);
+        allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+        allow update: if isAuthenticated() && isOwner(resource.data.userId);
+        allow delete: if isAuthenticated() && isOwner(resource.data.userId);
+    }
+    
+    // Vault (Encrypted Data)
+    match /vault/{itemId} {
+      allow read: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid);
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && isOwner(resource.data.userId);
+      allow delete: if isAuthenticated() && isOwner(resource.data.userId);
+    }
   }
 }
 

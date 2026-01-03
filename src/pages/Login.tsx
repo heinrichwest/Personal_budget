@@ -30,7 +30,7 @@ export default function Login() {
     <div className="auth-container">
       <div className="auth-card">
         <h1>Welcome Back</h1>
-        <p className="auth-subtitle">Sign in to manage your personal budget</p>
+        <p className="auth-subtitle">Sign in to access your life dashboard</p>
         {error && <div className="error-message">{error}</div>}
         <form onSubmit={handleSubmit}>
           <div className="form-group">

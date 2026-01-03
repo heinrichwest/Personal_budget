@@ -4,8 +4,12 @@ import { AuthProvider, useAuth } from './contexts/AuthContext'
 import Login from './pages/Login'
 import Register from './pages/Register'
 import Dashboard from './pages/Dashboard'
-// Budget page removed - budgets are now edited directly on Dashboard
-// import Budget from './pages/Budget'
+import BudgetDashboard from './pages/BudgetDashboard'
+import LifeDetails from './pages/LifeDetails'
+import Documents from './pages/Documents'
+import Fleet from './pages/Fleet'
+import Assets from './pages/Assets'
+import Vault from './pages/Vault'
 import Transactions from './pages/Transactions'
 import AdminDashboard from './pages/admin/AdminDashboard'
 import UserManagement from './pages/admin/UserManagement'
@@ -78,6 +82,12 @@ function AppRoutes() {
       >
         <Route index element={<NavigateToHome />} />
         <Route path="dashboard" element={<Dashboard />} />
+        <Route path="budget" element={<BudgetDashboard />} />
+        <Route path="life-admin" element={<LifeDetails />} />
+        <Route path="documents" element={<Documents />} />
+        <Route path="fleet" element={<Fleet />} />
+        <Route path="assets" element={<Assets />} />
+        <Route path="vault" element={<Vault />} />
         <Route path="transactions" element={<Transactions />} />
         <Route
           path="admin"

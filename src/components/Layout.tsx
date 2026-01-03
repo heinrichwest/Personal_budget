@@ -16,13 +16,14 @@ export default function Layout() {
       <nav className="navbar">
         <div className="nav-container">
           <div className="nav-brand">
-            <h2>Personal Budget</h2>
+            <h2>My Life</h2>
             <span className="brand-subtitle">SpecCon Holdings</span>
           </div>
           <div className="nav-links">
+            <Link to="/dashboard">Dashboard</Link>
             {!isSystemAdmin && (
               <>
-                <Link to="/dashboard">Dashboard</Link>
+                <Link to="/budget">Budget</Link>
                 <Link to="/transactions">Transactions</Link>
               </>
             )}
