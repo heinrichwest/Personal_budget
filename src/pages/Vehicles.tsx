@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react'
+import { Step } from 'react-joyride'
+import PageTour from '../components/PageTour'
 import { collection, query, where, addDoc, deleteDoc, doc, onSnapshot, updateDoc } from 'firebase/firestore'
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage'
 import { db, storage } from '../config/firebase'
@@ -159,8 +161,25 @@ export default function Vehicles() {
 
     if (loading) return <div className="loading">Loading vehicles...</div>
 
+    const tourSteps: Step[] = [
+        {
+            target: 'body',
+            content: 'Manage your vehicle fleet here. Track registration numbers, license expiries, and service notes.',
+            placement: 'center',
+        },
+        {
+            target: '.details-header button',
+            content: 'Click here to add a vehicle. You can upload photos to help identify them easily.',
+        },
+        {
+            target: '.details-grid-column',
+            content: 'Your vehicles will appear here. We highlight expiring licenses automatically.',
+        },
+    ]
+
     return (
         <div className="details-container">
+            <PageTour pageId="vehicles" steps={tourSteps} />
             <div className="details-header">
                 <h1>My Vehicles</h1>
                 <button className="btn-primary" onClick={() => {

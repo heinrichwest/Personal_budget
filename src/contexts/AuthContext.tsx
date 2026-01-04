@@ -6,7 +6,7 @@ import {
   signOut,
   onAuthStateChanged,
 } from 'firebase/auth'
-import { doc, getDoc, setDoc, query, collection, where, getDocs } from 'firebase/firestore'
+import { doc, getDoc, setDoc, updateDoc, arrayUnion, query, collection, where, getDocs } from 'firebase/firestore'
 import { auth, db } from '../config/firebase'
 
 interface UserRole {
@@ -15,7 +15,7 @@ interface UserRole {
   displayName?: string
   createdAt: Date
   mustChangePassword?: boolean
-  seenTour?: boolean // Persist if user has seen the tour
+  seenTours?: string[] // Array of page IDs where tour has been seen
 }
 
 interface AuthContextType {
@@ -29,7 +29,7 @@ interface AuthContextType {
   register: (email: string, password: string, displayName?: string) => Promise<void>
   logout: () => Promise<void>
   clearPasswordChangeFlag: () => Promise<void>
-  completeTour: () => Promise<void>
+  completeTour: (pageId: string) => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
@@ -111,11 +111,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUserRole(prev => prev ? { ...prev, mustChangePassword: false } : null)
   }
 
-  async function completeTour() {
+  async function completeTour(pageId: string) {
     if (!currentUser) return
     const userRef = doc(db, 'users', currentUser.uid)
-    await setDoc(userRef, { seenTour: true }, { merge: true })
-    setUserRole(prev => prev ? { ...prev, seenTour: true } : null)
+
+    // Firestore update
+    await updateDoc(userRef, {
+      seenTours: arrayUnion(pageId)
+    })
+
+    // Local state update
+    setUserRole(prev => {
+      if (!prev) return null
+      const currentSeen = prev.seenTours || []
+      if (currentSeen.includes(pageId)) return prev
+      return { ...prev, seenTours: [...currentSeen, pageId] }
+    })
   }
 
   useEffect(() => {

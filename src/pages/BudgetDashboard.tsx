@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import { Step } from 'react-joyride'
+import PageTour from '../components/PageTour'
 import { getDoc, doc, updateDoc } from 'firebase/firestore'
 import { db } from '../config/firebase'
 import { useAuth } from '../contexts/AuthContext'
@@ -60,8 +62,29 @@ export default function Dashboard() {
     )
   }
 
+  const tourSteps: Step[] = [
+    {
+      target: 'body',
+      content: 'This is your Personal Budget Dashboard. Here you can analyze your financial habits.',
+      placement: 'center',
+    },
+    {
+      target: '.budget-nav-container',
+      content: 'Use this navigation bar to switch between Transactions, Mappings, and the "How It Works" guide.',
+    },
+    ...(isAdmin ? [{
+      target: '.dashboard-settings-toggle',
+      content: 'Admins can configure global settings like the "Month Start Day" here.',
+    }] : []),
+    {
+      target: '.dashboard-tabs',
+      content: 'Switch between different analysis views: High Level, Month-to-Month, or Detailed category breakdown.',
+    },
+  ]
+
   return (
     <div className="dashboard-container">
+      <PageTour pageId="budget" steps={tourSteps} />
       {/* Shared Budget Navigation */}
       <BudgetNav />
 

@@ -1,5 +1,7 @@
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
+import { Step } from 'react-joyride'
+import PageTour from '../components/PageTour'
 import './Dashboard.css'
 
 interface ModuleCardProps {
@@ -84,8 +86,42 @@ export default function Dashboard() {
         </svg>
     )
 
+    const tourSteps: Step[] = [
+        {
+            target: 'body',
+            content: <h2>Welcome to My Life!</h2>,
+            placement: 'center',
+            disableBeacon: true,
+        },
+        {
+            target: '#tour-budget-card',
+            content: 'Track your income, expenses, and analyze your financial health here.',
+        },
+        {
+            target: '#tour-life-card',
+            content: 'Manage personal details, medical aid, and family profiles.',
+        },
+        {
+            target: '#tour-insurance-card',
+            content: 'Keep track of all your insurance policies in one place.',
+        },
+        {
+            target: '#tour-vault-card',
+            content: 'Securely store important passwords and credentials.',
+        },
+        {
+            target: '#tour-assets-card',
+            content: 'Log your assets, warranties, and purchase slips.',
+        },
+        {
+            target: '#tour-vehicles-card',
+            content: 'Manage your vehicle registrations and service history.',
+        },
+    ]
+
     return (
         <div className="dashboard-hub">
+            <PageTour pageId="dashboard" steps={tourSteps} />
             <header className="hub-header">
                 <h1>Welcome back, {currentUser?.email?.split('@')[0]}</h1>
                 <p>Manage your entire life in one secure place.</p>

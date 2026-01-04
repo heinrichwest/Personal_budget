@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from 'react'
+import { Step } from 'react-joyride'
+import PageTour from '../components/PageTour'
 import { collection, query, where, getDocs, addDoc, updateDoc, Timestamp, writeBatch, doc } from 'firebase/firestore'
 import { db } from '../config/firebase'
 import { useAuth } from '../contexts/AuthContext'
@@ -1222,8 +1224,29 @@ export default function Transactions() {
     )
   }
 
+  const tourSteps: Step[] = [
+    {
+      target: 'body',
+      content: 'Manage and categorize your bank transactions here.',
+      placement: 'center',
+    },
+    {
+      target: '.transactions-header h1',
+      content: 'Use this section to import your CSV bank statements.',
+    },
+    {
+      target: '.transactions-header .btn-primary',
+      content: 'Click "Analyze with AI" to automatically categorize your transactions using Artificial Intelligence.',
+    },
+    {
+      target: '.transactions-list',
+      content: 'Review your transactions table. You can manually edit categories or approve AI suggestions here.',
+    }
+  ]
+
   return (
     <div className="container">
+      <PageTour pageId="transactions" steps={tourSteps} />
       <BudgetNav />
 
 
