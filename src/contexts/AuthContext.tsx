@@ -15,6 +15,7 @@ interface UserRole {
   displayName?: string
   createdAt: Date
   mustChangePassword?: boolean
+  seenTour?: boolean // Persist if user has seen the tour
 }
 
 interface AuthContextType {
@@ -28,6 +29,7 @@ interface AuthContextType {
   register: (email: string, password: string, displayName?: string) => Promise<void>
   logout: () => Promise<void>
   clearPasswordChangeFlag: () => Promise<void>
+  completeTour: () => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
@@ -109,6 +111,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUserRole(prev => prev ? { ...prev, mustChangePassword: false } : null)
   }
 
+  async function completeTour() {
+    if (!currentUser) return
+    const userRef = doc(db, 'users', currentUser.uid)
+    await setDoc(userRef, { seenTour: true }, { merge: true })
+    setUserRole(prev => prev ? { ...prev, seenTour: true } : null)
+  }
+
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setCurrentUser(user)
@@ -145,6 +154,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     register,
     logout,
     clearPasswordChangeFlag,
+    completeTour
   }
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

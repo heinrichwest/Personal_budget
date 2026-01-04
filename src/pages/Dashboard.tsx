@@ -8,13 +8,15 @@ interface ModuleCardProps {
     icon: React.ReactNode
     path: string
     color: string
+    id?: string
 }
 
-function ModuleCard({ title, description, icon, path, color }: ModuleCardProps) {
+function ModuleCard({ title, description, icon, path, color, id }: ModuleCardProps) {
     const navigate = useNavigate()
 
     return (
         <div
+            id={id}
             className="module-card"
             onClick={() => navigate(path)}
             style={{ '--card-accent-color': color } as React.CSSProperties}
@@ -96,6 +98,7 @@ export default function Dashboard() {
                     icon={BudgetIcon}
                     path="/budget"
                     color="#10b981"
+                    id="tour-budget-card"
                 />
                 <ModuleCard
                     title="My Life Details"
@@ -103,6 +106,7 @@ export default function Dashboard() {
                     icon={LifeIcon}
                     path="/life-admin"
                     color="#3b82f6"
+                    id="tour-life-card"
                 />
                 <ModuleCard
                     title="My Insurance"
@@ -110,6 +114,7 @@ export default function Dashboard() {
                     icon={InsuranceIcon}
                     path="/insurance"
                     color="#f59e0b"
+                    id="tour-insurance-card"
                 />
                 <ModuleCard
                     title="My Vault"
@@ -117,6 +122,7 @@ export default function Dashboard() {
                     icon={VaultIcon}
                     path="/vault"
                     color="#ef4444"
+                    id="tour-vault-card"
                 />
                 <ModuleCard
                     title="My Assets"
@@ -124,6 +130,7 @@ export default function Dashboard() {
                     icon={AssetIcon}
                     path="/assets"
                     color="#8b5cf6"
+                    id="tour-assets-card"
                 />
                 <ModuleCard
                     title="My Vehicles"
@@ -131,6 +138,7 @@ export default function Dashboard() {
                     icon={FleetIcon}
                     path="/fleet"
                     color="#ec4899"
+                    id="tour-vehicles-card"
                 />
             </div>
         </div>
