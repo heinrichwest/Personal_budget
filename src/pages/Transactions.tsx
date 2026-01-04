@@ -1237,15 +1237,19 @@ export default function Transactions() {
     },
     {
       target: '.transactions-header .btn-primary',
-      content: 'Once uploaded, click "Analyze with AI" to let our smart system automatically categorize your transactions.',
+      content: 'Once uploaded, click "Analyze with AI" to let our smart system automatically categorize your transactions. Note: System mappings and categories are updated daily.',
     },
     {
       target: '.transactions-list',
       content: 'This table shows all your transactions. You can sort by date, amount, or description.',
     },
     {
-      target: '.transactions-list th:nth-child(5)', // Assuming Category is around 5th column
-      content: 'The "Category" column shows how each transaction is mapped. Click on any row to manually change the category if needed.',
+      target: '.transactions-list th:nth-child(5)', // Category Column
+      content: 'The "Category" column shows how each transaction is mapped. Some categories are system-generated to help standardize your budget.',
+    },
+    {
+      target: '.transactions-list tr:first-child .btn-map-action',
+      content: 'Click the "Map" button on any row to open the Mapping Modal. Here you can manually assign a category, create a custom rule, or revert to system defaults.',
     }
   ]
 
@@ -1604,7 +1608,7 @@ export default function Transactions() {
                           setSelectedTransaction(transaction)
                           setShowMapping(true)
                         }}
-                        className="btn-outline btn-sm"
+                        className="btn-outline btn-sm btn-map-action"
                       >
                         Map
                       </button>
