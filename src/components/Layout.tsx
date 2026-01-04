@@ -21,20 +21,12 @@ export default function Layout() {
           </div>
           <div className="nav-links">
             <Link to="/dashboard">Dashboard</Link>
-            {!isSystemAdmin && (
-              <>
-                <Link to="/budget">Budget</Link>
-                <Link to="/transactions">Transactions</Link>
-              </>
-            )}
-            <Link to="/mappings">Mappings</Link>
             {isSystemAdmin && (
               <Link to="/tables">Tables</Link>
             )}
             {isAdmin && (
               <Link to="/admin">Admin</Link>
             )}
-            <Link to="/how-it-works">How It Works</Link>
           </div>
           <div className="nav-user">
             <span className="user-email">{currentUser?.email}</span>
@@ -51,4 +43,3 @@ export default function Layout() {
     </div>
   )
 }
-

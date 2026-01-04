@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
-
 import { getDoc, doc, updateDoc } from 'firebase/firestore'
 import { db } from '../config/firebase'
 import { useAuth } from '../contexts/AuthContext'
 import DashboardReport from '../components/DashboardReport'
 import HighLevelAnalysis from '../components/HighLevelAnalysis'
 import CategoryDetailAnalysis from '../components/CategoryDetailAnalysis'
+import BudgetNav from '../components/BudgetNav'
 import './BudgetDashboard.css'
 
 type TabType = 'high-level' | 'mtm' | 'detail'
@@ -28,8 +28,6 @@ export default function Dashboard() {
         if (userDoc.exists() && userDoc.data().monthStartDay) {
           setMonthStartDay(userDoc.data().monthStartDay)
         }
-
-
       } catch (error) {
         console.error('Error loading summary:', error)
       } finally {
@@ -64,6 +62,9 @@ export default function Dashboard() {
 
   return (
     <div className="dashboard-container">
+      {/* Shared Budget Navigation */}
+      <BudgetNav />
+
       {/* Settings Button - Only for admins */}
       {isAdmin && (
         <div className="dashboard-settings-toggle">
@@ -146,6 +147,3 @@ export default function Dashboard() {
     </div>
   )
 }
-
-
-

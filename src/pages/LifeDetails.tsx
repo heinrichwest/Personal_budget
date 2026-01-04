@@ -64,6 +64,8 @@ export default function LifeDetails() {
 
     // UI State
     const [activeMember, setActiveMember] = useState<FamilyMember | null>(null)
+    const [activeTab, setActiveTab] = useState('Personal') // Personal, Medical
+
     const [showMemberForm, setShowMemberForm] = useState(false)
     const [showSicknessForm, setShowSicknessForm] = useState(false)
     const [showOpForm, setShowOpForm] = useState(false)
@@ -147,7 +149,6 @@ export default function LifeDetails() {
             },
             (error) => {
                 console.error("Error fetching operations:", error)
-                // Even on error, we should stop loading or we get stuck
                 setLoading(false)
             }
         )
@@ -163,7 +164,6 @@ export default function LifeDetails() {
     // --- Member Actions ---
 
     function handleEditMemberClick(member: FamilyMember) {
-        console.log("Edit button clicked for:", member)
         setEditingMemberId(member.id)
         setMemName(member.name)
         setMemRel(member.relationship)
@@ -172,7 +172,6 @@ export default function LifeDetails() {
         setMemConditions(member.medicalConditions || '')
         setMemHistory(member.medicalHistory || '')
         setShowMemberForm(true)
-        console.log("State updated, opening form...")
     }
 
     async function handleSaveMember(e: React.FormEvent) {
@@ -192,15 +191,12 @@ export default function LifeDetails() {
 
             if (editingMemberId) {
                 // Update
-                console.log("Updating member...", editingMemberId)
                 await updateDoc(doc(db, 'familyMembers', editingMemberId), memberData)
-                // If the updated member is currently active, update the local active state to reflect changes immediately
                 if (activeMember?.id === editingMemberId) {
                     setActiveMember(prev => prev ? { ...prev, ...memberData } : null)
                 }
             } else {
                 // Add New
-                console.log("Adding new member...")
                 await addDoc(collection(db, 'familyMembers'), {
                     userId: currentUser.uid,
                     ...memberData,
@@ -210,7 +206,6 @@ export default function LifeDetails() {
                 })
             }
 
-            console.log("Save complete.")
             setShowMemberForm(false)
             resetMemberForm()
         } catch (error: any) {
@@ -369,13 +364,155 @@ export default function LifeDetails() {
 
     if (loading) return <div className="loading">Loading My Life...</div>
 
-    // View: Single Member Details
+    // View: Single Member Details (Tabbed)
     if (activeMember) {
         const memberDetails = details.filter(d => d.memberId === activeMember.id)
         const memberSickness = sicknessLogs.filter(l => l.memberId === activeMember.id)
         const memberOperations = operations.filter(o => o.memberId === activeMember.id)
 
-        const categories = ['Identity', 'Medical', 'Other']
+        // Items for "Other" Identity tab
+        const identityItems = memberDetails.filter(d => d.category === 'Identity')
+        const otherItems = memberDetails.filter(d => d.category === 'Other')
+
+        const renderTabContent = () => {
+            switch (activeTab) {
+                case 'Personal':
+                    return (
+                        <div className="tab-content fade-in">
+                            <div className="section-header"><h3>Identity Information</h3></div>
+                            <div className="details-grid-column">
+                                <div className="detail-section">
+                                    <div className="section-header">
+                                        <h4>Basic Details</h4>
+                                        <button className="btn-text" onClick={() => handleEditMemberClick(activeMember)}>Edit</button>
+                                    </div>
+                                    <div className="section-list">
+                                        <div className="detail-row"><span className="row-label">Full Name</span><span className="row-value">{activeMember.name}</span></div>
+                                        <div className="detail-row"><span className="row-label">Relationship</span><span className="row-value">{activeMember.relationship}</span></div>
+                                        <div className="detail-row"><span className="row-label">ID Number</span><span className="row-value">{activeMember.idNumber || 'Not set'}</span></div>
+                                    </div>
+                                </div>
+
+                                <div className="detail-section">
+                                    <div className="section-header">
+                                        <h4>Other Identity Documents</h4>
+                                        <button className="btn-text" onClick={() => setEditingDetail({ category: 'Identity', label: '', value: '' })}>+ Add</button>
+                                    </div>
+                                    <div className="section-list">
+                                        {identityItems.map(item => (
+                                            <div key={item.id} className="detail-row">
+                                                <div className="row-content">
+                                                    <span className="row-label">{item.label}</span>
+                                                    <span className="row-value">{item.value}</span>
+                                                    {item.notes && <span className="row-notes">{item.notes}</span>}
+                                                </div>
+                                                <button className="btn-icon" onClick={() => handleDeleteDetail(item.id)}>×</button>
+                                            </div>
+                                        ))}
+                                        {identityItems.length === 0 && <div className="empty-text">No other documents listed.</div>}
+                                    </div>
+                                </div>
+
+                                <div className="detail-section">
+                                    <div className="section-header">
+                                        <h4>Other Details</h4>
+                                        <button className="btn-text" onClick={() => setEditingDetail({ category: 'Other', label: '', value: '' })}>+ Add</button>
+                                    </div>
+                                    <div className="section-list">
+                                        {otherItems.map(item => (
+                                            <div key={item.id} className="detail-row">
+                                                <div className="row-content">
+                                                    <span className="row-label">{item.label}</span>
+                                                    <span className="row-value">{item.value}</span>
+                                                    {item.notes && <span className="row-notes">{item.notes}</span>}
+                                                </div>
+                                                <button className="btn-icon" onClick={() => handleDeleteDetail(item.id)}>×</button>
+                                            </div>
+                                        ))}
+                                        {otherItems.length === 0 && <div className="empty-text">No other details.</div>}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )
+                case 'Medical':
+                    return (
+                        <div className="tab-content fade-in">
+                            <div className="medical-profile-section">
+                                <div className="section-header">
+                                    <h3>Medical Profile</h3>
+                                    <button className="btn-text" onClick={() => handleEditMemberClick(activeMember)}>Edit Details</button>
+                                </div>
+                                <div className="medical-info-list">
+                                    <div className="medical-input-group">
+                                        <label>Allergies</label>
+                                        <div className="readonly-input">{activeMember.allergies || 'None recorded'}</div>
+                                    </div>
+                                    <div className="medical-input-group">
+                                        <label>Other Medical Information</label>
+                                        <div className="readonly-input">{activeMember.medicalConditions || 'None recorded'}</div>
+                                    </div>
+                                    <div className="medical-input-group">
+                                        <label>General Medical History</label>
+                                        <div className="readonly-input">{activeMember.medicalHistory || 'None recorded'}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="section-header" style={{ marginTop: '2rem' }}>
+                                <h3>Operations & Surgeries</h3>
+                                <button className="btn-primary btn-sm" onClick={() => setShowOpForm(true)}>+ Add Operation</button>
+                            </div>
+                            {memberOperations.length === 0 ? (
+                                <div className="empty-card-placeholder">
+                                    <p>No operations recorded.</p>
+                                    <button className="btn-text" onClick={() => setShowOpForm(true)}>Add Record</button>
+                                </div>
+                            ) : (
+                                <div className="operations-list">
+                                    {memberOperations.map(op => (
+                                        <div key={op.id} className="operation-card">
+                                            <div className="op-header">
+                                                <h4>{op.operationName}</h4>
+                                                <span className="op-date">{op.date}</span>
+                                            </div>
+                                            <div className="op-details">
+                                                <div className="op-row"><span className="icon">🏥</span> <span>{op.hospital || 'Hospital N/A'}</span></div>
+                                                <div className="op-row"><span className="icon">👨‍⚕️</span> <span>{op.doctor || 'Doctor N/A'}</span></div>
+                                                {op.notes && <div className="op-notes">"{op.notes}"</div>}
+                                            </div>
+                                            <button className="delete-op-btn" onClick={() => handleDeleteOperation(op.id)}>🗑️</button>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+
+                            <div className="detail-section" style={{ marginBottom: '2rem', marginTop: '2rem' }}>
+                                <div className="section-header">
+                                    <h3>Sickness History</h3>
+                                    <button className="btn-text" onClick={() => setShowSicknessForm(true)}>+ Log Sickness</button>
+                                </div>
+                                <div className="section-list">
+                                    {memberSickness.map(log => (
+                                        <div key={log.id} className="sickness-log">
+                                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                                <h4>{log.sicknessName}</h4>
+                                                <button className="btn-icon" onClick={() => handleDeleteSickness(log.id)}>×</button>
+                                            </div>
+                                            <div className="sickness-meta">Started: {log.startDate} | Recovery: {log.recoveryDuration}</div>
+                                            <div><strong>Meds:</strong> {log.medicationUsed}</div>
+                                            {log.notes && <div className="op-notes">"{log.notes}"</div>}
+                                        </div>
+                                    ))}
+                                    {memberSickness.length === 0 && <div className="empty-text">No sickness history recorded.</div>}
+                                </div>
+                            </div>
+                        </div>
+                    )
+                default:
+                    return null
+            }
+        }
 
         return (
             <div className="details-container">
@@ -396,134 +533,30 @@ export default function LifeDetails() {
                     <div className="profile-info">
                         <h1>{activeMember.name}</h1>
                         <div className="badge badge-secondary">{activeMember.relationship}</div>
-                        <div style={{ marginTop: '0.5rem', color: '#6B7280' }}>
-                            {activeMember.idNumber ? `ID: ${activeMember.idNumber}` : 'No ID Number provided'}
-                        </div>
                     </div>
                     <div className="profile-actions-col">
-                        <button className="btn-outline btn-sm" onClick={() => handleEditMemberClick(activeMember)}>Edit Profile</button>
-                        <button className="btn-outline btn-sm delete-btn" onClick={() => handleDeleteMember(activeMember)}>Delete</button>
+                        <button className="btn-outline btn-sm delete-btn" onClick={() => handleDeleteMember(activeMember)}>Delete Profile</button>
                     </div>
                 </div>
 
-                {/* 1. PERSONAL DETAILS (Summary) */}
-                {/* <div className="section-header"><h3>Personal Information</h3></div> */}
-                {/* We already showed the core stuff in the header, let's keep it clean or add a specific card if needed.
-                    But user asked for "First Personal Info, Then Medical".
-                    The Header acts as Personal Info. Let's make sure we have everything.
-                */}
-
-                {/* 2. MEDICAL HISTORY (Profile) */}
-                <div className="medical-profile-section" style={{ marginTop: '2rem' }}>
-                    <div className="section-header">
-                        <h3>Medical Profile</h3>
-                        <button className="btn-text" onClick={() => handleEditMemberClick(activeMember)}>Edit Details</button>
-                    </div>
-                    <div className="medical-info-grid">
-                        <div className="med-card">
-                            <label>Allergies</label>
-                            <div className="med-value">{activeMember.allergies || 'Aucun known allergies'}</div>
-                        </div>
-                        <div className="med-card">
-                            <label>Medical Conditions</label>
-                            <div className="med-value">{activeMember.medicalConditions || 'No chronic conditions listed'}</div>
-                        </div>
-                        <div className="med-card full-width">
-                            <label>General Medical History</label>
-                            <div className="med-value">{activeMember.medicalHistory || 'No history recorded'}</div>
-                        </div>
-                    </div>
+                {/* Tabs Navigation */}
+                <div className="tabs-nav">
+                    {['Personal', 'Medical'].map(tab => (
+                        <button
+                            key={tab}
+                            className={`tab-btn ${activeTab === tab ? 'active' : ''}`}
+                            onClick={() => setActiveTab(tab)}
+                        >
+                            {tab}
+                        </button>
+                    ))}
                 </div>
 
-                {/* Operations Section */}
-                <div className="section-header" style={{ marginTop: '2rem' }}>
-                    <h3>Operations & Surgeries</h3>
-                    <button className="btn-primary btn-sm" onClick={() => setShowOpForm(true)}>+ Add Operation</button>
+                <div className="tab-container">
+                    {renderTabContent()}
                 </div>
 
-                {memberOperations.length === 0 ? (
-                    <div className="empty-card-placeholder">
-                        <p>No operations recorded.</p>
-                        <button className="btn-text" onClick={() => setShowOpForm(true)}>Add Record</button>
-                    </div>
-                ) : (
-                    <div className="operations-list">
-                        {memberOperations.map(op => (
-                            <div key={op.id} className="operation-card">
-                                <div className="op-header">
-                                    <h4>{op.operationName}</h4>
-                                    <span className="op-date">{op.date}</span>
-                                </div>
-                                <div className="op-details">
-                                    <div className="op-row">
-                                        <span className="icon">🏥</span> <span>{op.hospital || 'Hospital not specified'}</span>
-                                    </div>
-                                    <div className="op-row">
-                                        <span className="icon">👨‍⚕️</span> <span>{op.doctor || 'Doctor not specified'}</span>
-                                    </div>
-                                    {op.notes && <div className="op-notes">"{op.notes}"</div>}
-                                </div>
-                                <button className="delete-op-btn" onClick={() => handleDeleteOperation(op.id)} title="Delete Record">🗑️</button>
-                            </div>
-                        ))}
-                    </div>
-                )}
-
-                {/* Sickness History Section */}
-                <div className="detail-section" style={{ marginBottom: '2rem', marginTop: '2rem' }}>
-                    <div className="section-header">
-                        <h3>Sickness History</h3>
-                        <button className="btn-text" onClick={() => setShowSicknessForm(true)}>+ Log Sickness</button>
-                    </div>
-                    <div className="section-list">
-                        {memberSickness.map(log => (
-                            <div key={log.id} className="sickness-log">
-                                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                                    <h4>{log.sicknessName}</h4>
-                                    <button className="btn-icon" onClick={() => handleDeleteSickness(log.id)}>×</button>
-                                </div>
-                                <div className="sickness-meta">Started: {log.startDate} | Recovery: {log.recoveryDuration}</div>
-                                <div><strong>Meds:</strong> {log.medicationUsed}</div>
-                                {log.notes && <div><em>{log.notes}</em></div>}
-                            </div>
-                        ))}
-                        {memberSickness.length === 0 && <div className="empty-text">No sickness history recorded.</div>}
-                    </div>
-                </div>
-
-                {/* Generic Details Section */}
-                <div className="details-grid-column">
-                    {categories.map(cat => {
-                        const catItems = memberDetails.filter(d => d.category === cat)
-                        if (cat === 'Medical') return null // Skip Medical here as we showed it above
-                        return (
-                            <div key={cat} className="detail-section">
-                                <div className="section-header">
-                                    <h3>{cat === 'Identity' ? 'Other Identity Documents' : `${cat} Details`}</h3>
-                                    <button className="btn-text"
-                                        onClick={() => setEditingDetail({ category: cat, label: '', value: '' })}>
-                                        + Add
-                                    </button>
-                                </div>
-                                <div className="section-list">
-                                    {catItems.map(item => (
-                                        <div key={item.id} className="detail-row">
-                                            <div className="row-content">
-                                                <span className="row-label">{item.label}</span>
-                                                <span className="row-value">{item.value}</span>
-                                                {item.notes && <span className="row-notes">{item.notes}</span>}
-                                            </div>
-                                            <button className="btn-icon" onClick={() => handleDeleteDetail(item.id)}>×</button>
-                                        </div>
-                                    ))}
-                                    {catItems.length === 0 && <div className="empty-text">No info added.</div>}
-                                </div>
-                            </div>
-                        )
-                    })}
-                </div>
-
-                {/* Modal for adding info */}
+                {/* Modals */}
                 {editingDetail && (
                     <div className="modal-overlay">
                         <div className="modal-content">
@@ -559,7 +592,6 @@ export default function LifeDetails() {
                     </div>
                 )}
 
-                {/* Operation Form Modal */}
                 {showOpForm && (
                     <div className="modal-overlay">
                         <div className="modal-content">
@@ -599,7 +631,6 @@ export default function LifeDetails() {
                     </div>
                 )}
 
-                {/* Sickness Form Modal */}
                 {showSicknessForm && (
                     <div className="modal-overlay">
                         <div className="modal-content">
@@ -634,7 +665,6 @@ export default function LifeDetails() {
                     </div>
                 )}
 
-                {/* Member Form Modal (For Editing) */}
                 {showMemberForm && (
                     <div className="modal-overlay">
                         <div className="modal-content">
@@ -648,7 +678,6 @@ export default function LifeDetails() {
                                     <label>Relationship</label>
                                     <input type="text" required placeholder="e.g. Spouse, Son" value={memRel} onChange={e => setMemRel(e.target.value)} />
                                 </div>
-                                {/* NEW FIELDS */}
                                 <div className="form-group">
                                     <label>ID Number</label>
                                     <input type="text" placeholder="Identity Number" value={memIdNum} onChange={e => setMemIdNum(e.target.value)} />
@@ -675,14 +704,14 @@ export default function LifeDetails() {
                         </div>
                     </div>
                 )}
-
             </div>
         )
     }
 
-    // View: Main Dashboard (Family Grid + Global Policies)
-    const globalMedical = details.filter(d => d.category === 'Global_MedicalAid')
-    const globalPolicies = details.filter(d => d.category === 'Global_Policy')
+    // View: Main Dashboard (Family Grid Only)
+    // Removed Global Policies/Medical Scheme from "My Life Details" root view as they are now likely under "Insurance" or per member.
+    // The user instruction "dont have a tab then under mylife for insurance and household assets" implies separating them.
+    // However, Family Details are still core to "My Life Details".
 
     return (
         <div className="details-container">
@@ -695,7 +724,7 @@ export default function LifeDetails() {
                 <h2>Family Details</h2>
                 <div className="family-grid">
                     {members.map(m => (
-                        <div key={m.id} className="family-card" onClick={() => setActiveMember(m)}>
+                        <div key={m.id} className="family-card" onClick={() => { setActiveMember(m); setActiveTab('Personal'); }}>
                             <div className="family-avatar">
                                 {m.photoUrl ? <img src={m.photoUrl} alt={m.name} /> : <span>{m.name[0]}</span>}
                             </div>
@@ -708,51 +737,6 @@ export default function LifeDetails() {
                         <div className="add-icon">+</div>
                         <div>Add Member</div>
                     </div>
-                </div>
-            </div>
-
-            <hr className="divider" />
-
-            {/* MEDICAL AID SCHEME */}
-            <div className="hub-section">
-                <div className="section-header">
-                    <h2>Medical Aid Scheme</h2>
-                    <button className="btn-outline btn-sm"
-                        onClick={() => setEditingDetail({ category: 'Global_MedicalAid', label: '', value: '' })}>
-                        + Add Details
-                    </button>
-                </div>
-                <div className="grid-cards-compact">
-                    {globalMedical.map(item => (
-                        <div key={item.id} className="info-card">
-                            <div className="info-label">{item.label}</div>
-                            <div className="info-value">{item.value}</div>
-                            <button className="del-btn-corner" onClick={() => handleDeleteDetail(item.id)}>×</button>
-                        </div>
-                    ))}
-                    {globalMedical.length === 0 && <div className="empty-state-text">No medical scheme details added.</div>}
-                </div>
-            </div>
-
-            {/* POLICIES */}
-            <div className="hub-section">
-                <div className="section-header">
-                    <h2>Insurance & Policies</h2>
-                    <button className="btn-outline btn-sm"
-                        onClick={() => setEditingDetail({ category: 'Global_Policy', label: '', value: '' })}>
-                        + Add Policy
-                    </button>
-                </div>
-                <div className="grid-cards-compact">
-                    {globalPolicies.map(item => (
-                        <div key={item.id} className="info-card">
-                            <div className="info-label">{item.label}</div>
-                            <div className="info-value">{item.value}</div>
-                            {item.notes && <div className="info-notes">{item.notes}</div>}
-                            <button className="del-btn-corner" onClick={() => handleDeleteDetail(item.id)}>×</button>
-                        </div>
-                    ))}
-                    {globalPolicies.length === 0 && <div className="empty-state-text">No policies added.</div>}
                 </div>
             </div>
 
@@ -770,7 +754,6 @@ export default function LifeDetails() {
                                 <label>Relationship</label>
                                 <input type="text" required placeholder="e.g. Spouse, Son" value={memRel} onChange={e => setMemRel(e.target.value)} />
                             </div>
-                            {/* NEW FIELDS */}
                             <div className="form-group">
                                 <label>ID Number</label>
                                 <input type="text" placeholder="Identity Number" value={memIdNum} onChange={e => setMemIdNum(e.target.value)} />
@@ -792,41 +775,6 @@ export default function LifeDetails() {
                                 <button type="submit" className="btn-primary" disabled={uploading}>
                                     {uploading ? 'Saving...' : (editingMemberId ? 'Save Changes' : 'Add Member')}
                                 </button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            )}
-
-            {editingDetail && (
-                <div className="modal-overlay">
-                    <div className="modal-content">
-                        <h3>Add Info</h3>
-                        <form onSubmit={handleSaveDetail}>
-                            <div className="form-group">
-                                <label>Label</label>
-                                <input type="text" placeholder="e.g. Policy Number" required
-                                    value={editingDetail.label}
-                                    onChange={e => setEditingDetail({ ...editingDetail, label: e.target.value })}
-                                />
-                            </div>
-                            <div className="form-group">
-                                <label>Value</label>
-                                <input type="text" required
-                                    value={editingDetail.value}
-                                    onChange={e => setEditingDetail({ ...editingDetail, value: e.target.value })}
-                                />
-                            </div>
-                            <div className="form-group">
-                                <label>Notes</label>
-                                <textarea
-                                    value={editingDetail.notes || ''}
-                                    onChange={e => setEditingDetail({ ...editingDetail, notes: e.target.value })}
-                                />
-                            </div>
-                            <div className="modal-actions">
-                                <button type="button" className="btn-outline" onClick={() => setEditingDetail(null)}>Cancel</button>
-                                <button type="submit" className="btn-primary">Save</button>
                             </div>
                         </form>
                     </div>

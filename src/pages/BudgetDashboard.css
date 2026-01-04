@@ -212,3 +212,47 @@
   border-radius: 0 0 8px 8px;
   min-height: 400px;
 }
+
+/* Budget Navigation Tiles */
+.budget-nav-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.budget-nav-tile {
+  background-color: white;
+  border-radius: 8px;
+  padding: 1rem;
+  text-decoration: none;
+  color: #4b5563;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+  border: 1px solid #e5e7eb;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  transition: all 0.2s;
+}
+
+.budget-nav-tile:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.budget-nav-tile.active {
+  background-color: var(--color-primary);
+  color: white;
+  border-color: var(--color-primary);
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+}
+
+.budget-nav-tile h4 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+}

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useAuth } from '../../contexts/AuthContext'
 import { collection, getDocs, getDoc, updateDoc, deleteDoc, addDoc, doc, query, orderBy, where, writeBatch } from 'firebase/firestore'
 import { db } from '../../config/firebase'
+import BudgetNav from '../../components/BudgetNav'
 import './Admin.css'
 
 interface TransactionMapping {
@@ -275,7 +276,7 @@ export default function MappingManagement() {
 
       // Get user's categories for resolution
       const userCategoriesSnap = await getDocs(query(collection(db, 'budgets'), where('userId', '==', targetUserId)))
-      const userCategories: Array<{id: string, name: string}> = []
+      const userCategories: Array<{ id: string, name: string }> = []
       userCategoriesSnap.forEach(doc => {
         const data = doc.data()
         if (data.name) {
@@ -625,6 +626,7 @@ export default function MappingManagement() {
 
   return (
     <div className="container">
+      <BudgetNav />
       <div className="admin-header">
         <h1>Mapping Management</h1>
         <p>View and manage transaction mappings for all users</p>

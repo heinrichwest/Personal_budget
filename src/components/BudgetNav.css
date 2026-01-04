@@ -1,0 +1,49 @@
+/* BudgetNav.css */
+.budget-nav-container {
+    background-color: white;
+    border-bottom: 1px solid #e5e7eb;
+    margin-bottom: 2rem;
+    padding: 0 1rem;
+}
+
+.budget-nav-list {
+    display: flex;
+    gap: 2rem;
+    max-width: 1200px;
+    margin: 0 auto;
+    overflow-x: auto;
+}
+
+.budget-nav-link {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 1rem 0.5rem;
+    color: #6b7280;
+    text-decoration: none;
+    font-weight: 500;
+    font-size: 0.95rem;
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.budget-nav-link:hover {
+    color: var(--primary-color, #1f2937);
+}
+
+.budget-nav-link.active {
+    color: var(--primary-color, #2563eb);
+    border-bottom-color: var(--primary-color, #2563eb);
+}
+
+/* Minimalist Icon */
+.nav-icon {
+    width: 18px;
+    height: 18px;
+    opacity: 0.7;
+}
+
+.budget-nav-link.active .nav-icon {
+    opacity: 1;
+}

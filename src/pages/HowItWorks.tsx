@@ -1,8 +1,10 @@
+import BudgetNav from '../components/BudgetNav'
 import './HowItWorks.css'
 
 export default function HowItWorks() {
   return (
     <div className="how-it-works-container">
+      <BudgetNav />
       <div className="how-it-works-header">
         <h1>How It Works</h1>
         <p>A step-by-step guide to managing your personal budget</p>

@@ -4,6 +4,7 @@ import { db } from '../config/firebase'
 import { useAuth } from '../contexts/AuthContext'
 import Papa from 'papaparse'
 import { format } from 'date-fns'
+import BudgetNav from '../components/BudgetNav'
 import './Transactions.css'
 
 interface Transaction {
@@ -1223,6 +1224,7 @@ export default function Transactions() {
 
   return (
     <div className="container">
+      <BudgetNav />
 
 
       {/* IMPORT WIZARD UI */}

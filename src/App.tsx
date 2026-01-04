@@ -7,9 +7,10 @@ import Dashboard from './pages/Dashboard'
 import BudgetDashboard from './pages/BudgetDashboard'
 import LifeDetails from './pages/LifeDetails'
 import Documents from './pages/Documents'
-import Fleet from './pages/Fleet'
+import Vehicles from './pages/Vehicles'
 import Assets from './pages/Assets'
 import Vault from './pages/Vault'
+import Insurance from './pages/Insurance'
 import Transactions from './pages/Transactions'
 import AdminDashboard from './pages/admin/AdminDashboard'
 import UserManagement from './pages/admin/UserManagement'
@@ -85,9 +86,11 @@ function AppRoutes() {
         <Route path="budget" element={<BudgetDashboard />} />
         <Route path="life-admin" element={<LifeDetails />} />
         <Route path="documents" element={<Documents />} />
-        <Route path="fleet" element={<Fleet />} />
+        <Route path="vehicles" element={<Vehicles />} />
+        <Route path="fleet" element={<Navigate to="/vehicles" replace />} />
         <Route path="assets" element={<Assets />} />
         <Route path="vault" element={<Vault />} />
+        <Route path="insurance" element={<Insurance />} />
         <Route path="transactions" element={<Transactions />} />
         <Route
           path="admin"
@@ -140,4 +143,3 @@ function App() {
 }
 
 export default App
-
