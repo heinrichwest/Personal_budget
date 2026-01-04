@@ -1224,23 +1224,28 @@ export default function Transactions() {
     )
   }
 
+
   const tourSteps: Step[] = [
     {
       target: 'body',
-      content: 'Manage and categorize your bank transactions here.',
+      content: 'Manage and categorize your bank transactions here to keep your budget accurate.',
       placement: 'center',
     },
     {
-      target: '.transactions-header h1',
-      content: 'Use this section to import your CSV bank statements.',
+      target: '.file-upload-section',
+      content: 'Start by uploading your bank statement (CSV format). Click "Choose File" to select your file.',
     },
     {
       target: '.transactions-header .btn-primary',
-      content: 'Click "Analyze with AI" to automatically categorize your transactions using Artificial Intelligence.',
+      content: 'Once uploaded, click "Analyze with AI" to let our smart system automatically categorize your transactions.',
     },
     {
       target: '.transactions-list',
-      content: 'Review your transactions table. You can manually edit categories or approve AI suggestions here.',
+      content: 'This table shows all your transactions. You can sort by date, amount, or description.',
+    },
+    {
+      target: '.transactions-list th:nth-child(5)', // Assuming Category is around 5th column
+      content: 'The "Category" column shows how each transaction is mapped. Click on any row to manually change the category if needed.',
     }
   ]
 
@@ -1430,7 +1435,7 @@ export default function Transactions() {
                 disabled={uploading || categoriesLoading}
                 style={{ display: 'none' }}
               />
-              <span className={`btn-primary ${categoriesLoading ? 'disabled' : ''}`}>
+              <span className="btn-primary file-select-btn">
                 {uploading ? 'Reading...' : categoriesLoading ? 'Loading System...' : 'Upload CSV'}
               </span>
             </label>
@@ -1454,7 +1459,7 @@ export default function Transactions() {
               <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                 <button
                   onClick={analyzeWithAI}
-                  className={`btn-sm btn-primary`}
+                  className={`btn-sm btn-primary ai-analyze-btn`}
                   disabled={isAnalyzing || unmappedCount === 0}
                   style={{ fontSize: '0.8rem', backgroundColor: '#7c4dff' }}
                 >
@@ -1517,10 +1522,10 @@ export default function Transactions() {
                   <th onClick={() => handleSort('description')} style={{ cursor: 'pointer' }}>
                     Description {sortConfig?.field === 'description' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
                   </th>
-                  <th onClick={() => handleSort('mappedDescription')} style={{ cursor: 'pointer' }}>
+                  <th onClick={() => handleSort('mappedDescription')} style={{ cursor: 'pointer' }} className="col-merchant">
                     Mapped To {sortConfig?.field === 'mappedDescription' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
                   </th>
-                  <th onClick={() => handleSort('categoryName')} style={{ cursor: 'pointer' }}>
+                  <th onClick={() => handleSort('categoryName')} style={{ cursor: 'pointer' }} className="col-category">
                     Category {sortConfig?.field === 'categoryName' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
                   </th>
                   <th onClick={() => handleSort('amount')} style={{ cursor: 'pointer' }}>

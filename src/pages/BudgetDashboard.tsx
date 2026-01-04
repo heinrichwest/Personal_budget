@@ -62,24 +62,34 @@ export default function Dashboard() {
     )
   }
 
+  /* Detailed Tour Steps */
   const tourSteps: Step[] = [
     {
       target: 'body',
-      content: 'This is your Personal Budget Dashboard. Here you can analyze your financial habits.',
+      content: 'This is your Personal Budget Dashboard. Analyze your financial habits and track your spending trends.',
       placement: 'center',
     },
     {
       target: '.budget-nav-container',
-      content: 'Use this navigation bar to switch between Transactions, Mappings, and the "How It Works" guide.',
+      content: 'Use this navigation bar to switch between Transactions, Mappings, and other budget tools.',
     },
-    ...(isAdmin ? [{
-      target: '.dashboard-settings-toggle',
-      content: 'Admins can configure global settings like the "Month Start Day" here.',
-    }] : []),
     {
       target: '.dashboard-tabs',
-      content: 'Switch between different analysis views: High Level, Month-to-Month, or Detailed category breakdown.',
+      content: 'Switch between different analysis views: "High Level" for summaries, "MtM" for a grid view of all months, or "Detail" for deep-dives.',
     },
+    {
+      target: '.view-mode-selector',
+      content: 'Use this dropdown to filter by specific months or view an average across your history.',
+      placement: 'bottom',
+    },
+    {
+      target: '.analysis-summary-cards',
+      content: 'See your key financial indicators at a glance: Income, Expenses, and Net Savings.',
+    },
+    {
+      target: '.analysis-grid',
+      content: 'Scroll down to see detailed charts of your spending and savings trends.',
+    }
   ]
 
   return (
